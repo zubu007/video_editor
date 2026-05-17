@@ -1,0 +1,121 @@
+.transcriptPanel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #1a1a1a;
+  color: #ffffff;
+  border-left: 1px solid #333;
+}
+
+.header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.stats {
+  font-size: 12px;
+  color: #888;
+}
+
+.transcriptContent {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  line-height: 2;
+  font-size: 16px;
+  user-select: text;
+}
+
+.word {
+  display: inline;
+  padding: 2px 1px;
+  margin: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #cccccc;
+}
+
+.word:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.word.active {
+  background-color: #3b82f6;
+  color: #ffffff;
+  font-weight: 500;
+  padding: 3px 4px;
+}
+
+.loadingContainer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #888;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #333;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #888;
+  text-align: center;
+}
+
+.emptyState p {
+  margin: 8px 0;
+}
+
+.hint {
+  font-size: 14px;
+  color: #666;
+}
+
+/* Custom scrollbar */
+.transcriptContent::-webkit-scrollbar {
+  width: 8px;
+}
+
+.transcriptContent::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.transcriptContent::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+
+.transcriptContent::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}

@@ -1,0 +1,3 @@
+"""
+Audio pause detection module.
+"""

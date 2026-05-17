@@ -1,0 +1,21 @@
+[project]
+name = "video-editor"
+version = "0.1.0"
+description = "A simple video editing tool which would let me input my podcast video and out comes the edited version."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper",
+    "torch",
+    "ffmpeg-python",
+    "moviepy",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "aiofiles>=23.2.1",
+    "pydub>=0.25.0",
+    "numpy>=1.24.0",
+]

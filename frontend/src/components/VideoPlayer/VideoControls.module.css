@@ -1,0 +1,8 @@
+.videoControls {
+  display: flex;
+  align-items: center;
+  background-color: #1a1a1a;
+  padding: 16px 12px;
+  gap: 8px;
+  color: white;
+}
