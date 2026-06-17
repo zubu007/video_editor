@@ -5,16 +5,16 @@ Feature registry for available video editing features.
 AVAILABLE_FEATURES = {
     "zoom": {
         "name": "zoom",
-        "description": "Adds a zoom effect to emphasize important content",
+        "description": "Adds a punch-in zoom effect to emphasize important content (zooms toward the speaker's face, or the frame center if no face is found)",
         "use_case": "Use for key points, important statements, or to add visual interest",
         "parameters": [
             {
                 "name": "zoom_level",
                 "type": "float",
                 "description": "Zoom factor (e.g., 1.2 for 20% zoom)",
-                "default": 1.2
+                "default": 1.2,
             }
-        ]
+        ],
     },
     "insert_stock_footage": {
         "name": "insert_stock_footage",
@@ -25,9 +25,9 @@ AVAILABLE_FEATURES = {
                 "name": "search_query",
                 "type": "string",
                 "description": "Keywords to search for relevant stock footage",
-                "required": True
+                "required": True,
             }
-        ]
+        ],
     },
     "text_overlay": {
         "name": "text_overlay",
@@ -38,9 +38,9 @@ AVAILABLE_FEATURES = {
                 "name": "text",
                 "type": "string",
                 "description": "The text to display",
-                "required": True
+                "required": True,
             },
-        ]
+        ],
     },
     # "transition": {
     #     "name": "transition",
@@ -68,16 +68,16 @@ def get_feature_descriptions_for_llm() -> str:
     descriptions = []
     for feature_id, feature in AVAILABLE_FEATURES.items():
         desc = f"- {feature['name']}: {feature['description']}\n  Use case: {feature['use_case']}"
-        if feature['parameters']:
+        if feature["parameters"]:
             params = []
-            for param in feature['parameters']:
+            for param in feature["parameters"]:
                 param_desc = f"{param['name']} ({param['type']})"
-                if param.get('required'):
+                if param.get("required"):
                     param_desc += " [required]"
                 params.append(param_desc)
             desc += f"\n  Parameters: {', '.join(params)}"
         descriptions.append(desc)
-    
+
     return "\n\n".join(descriptions)
 
 

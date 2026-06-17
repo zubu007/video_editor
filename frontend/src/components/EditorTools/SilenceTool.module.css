@@ -1,0 +1,155 @@
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.header,
+.sectionHeader,
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.header h3,
+.sectionHeader h4 {
+  margin: 0;
+  color: #111827;
+  color: var(--text);
+}
+
+.header p,
+.empty {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sectionHeader span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.rangeList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.rangeRow {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.disabled {
+  opacity: 0.55;
+}
+
+.rangeToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.duration,
+.savedBadge {
+  color: #6b7280;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.savedBadge {
+  color: #047857;
+  font-weight: 600;
+}
+
+.primaryButton,
+.secondaryButton,
+.renderButton {
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.primaryButton,
+.renderButton {
+  background: #2563eb;
+  background: var(--primary);
+  color: white;
+  padding: 10px 14px;
+}
+
+.secondaryButton {
+  align-self: flex-start;
+  background: #111827;
+  color: white;
+  padding: 9px 12px;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.renderButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.linkButton,
+.dangerButton {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.linkButton {
+  color: #2563eb;
+  color: var(--primary);
+}
+
+.dangerButton {
+  color: #dc2626;
+}
+
+.renderLink {
+  color: #2563eb;
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 13px;
+  padding: 10px 12px;
+}

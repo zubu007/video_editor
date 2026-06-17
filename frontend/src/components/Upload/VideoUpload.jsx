@@ -1,8 +1,8 @@
 import React, { useState, useRef } from 'react';
-import { isVideoFile, formatFileSize, createBlobURL, revokeBlobURL } from '../../utils/videoUtils';
+import { isVideoFile, formatFileSize, createBlobURL } from '../../utils/videoUtils';
 import styles from './VideoUpload.module.css';
 
-function VideoUpload({ onVideoSelect, onUploadProgress }) {
+function VideoUpload({ onVideoSelect }) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState(null);

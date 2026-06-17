@@ -2,6 +2,7 @@ import re
 
 FILLER_WORDS = ["um", "ah", "uh", "er", "like", "so", "you know"]
 
+
 def detect_filler_words(words: list) -> list:
     """
     Detects filler words in a list of words.
@@ -17,9 +18,8 @@ def detect_filler_words(words: list) -> list:
     filler_word_ranges = []
     for word in words:
         # Using regex for a case-insensitive match and to handle variations
-        if re.search(r'\b(' + '|'.join(FILLER_WORDS) + r')\b', word['word'], re.IGNORECASE):
-            filler_word_ranges.append({
-                "start": word['start'],
-                "end": word['end']
-            })
+        if re.search(
+            r"\b(" + "|".join(FILLER_WORDS) + r")\b", word["word"], re.IGNORECASE
+        ):
+            filler_word_ranges.append({"start": word["start"], "end": word["end"]})
     return filler_word_ranges

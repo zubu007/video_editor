@@ -36,7 +36,9 @@ def main() -> None:
     print("\nConverted to sentence-level transcript:")
     print("-" * 60)
     for sentence in sentences:
-        print(f"[{sentence['start']:.2f}s -> {sentence['end']:.2f}s] {sentence['text']}")
+        print(
+            f"[{sentence['start']:.2f}s -> {sentence['end']:.2f}s] {sentence['text']}"
+        )
 
     print("\nSummary:")
     print(f"Total words: {len(words)}")

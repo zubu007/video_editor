@@ -5,23 +5,23 @@
 }
 
 .dropZone {
-  border: 2px dashed #ccc;
-  border-radius: 12px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
   padding: 48px 32px;
   text-align: center;
   transition: all 0.3s ease;
-  background-color: #f9f9f9;
+  background-color: var(--surface);
   position: relative;
 }
 
 .dropZone:hover {
-  border-color: #999;
-  background-color: #f5f5f5;
+  border-color: var(--primary);
+  background-color: var(--surface-2);
 }
 
 .dropZone.dragging {
-  border-color: #e74c3c;
-  background-color: #ffebee;
+  border-color: var(--primary);
+  background-color: var(--surface-2);
   transform: scale(1.02);
 }
 
@@ -37,33 +37,33 @@
 }
 
 .uploadIcon {
-  color: #999;
+  color: var(--muted);
   transition: color 0.3s ease;
 }
 
 .dropZone:hover .uploadIcon,
 .dropZone.dragging .uploadIcon {
-  color: #e74c3c;
+  color: var(--primary);
 }
 
 .title {
   margin: 0;
   font-size: 24px;
   font-weight: 600;
-  color: #333;
+  color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .subtitle {
   margin: 0;
   font-size: 14px;
-  color: #999;
+  color: var(--muted);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .browseButton {
   padding: 12px 32px;
-  background-color: #e74c3c;
+  background-color: var(--primary);
   color: white;
   border: none;
   border-radius: 6px;
@@ -75,7 +75,7 @@
 }
 
 .browseButton:hover {
-  background-color: #c0392b;
+  background-color: var(--primary-hover);
   transform: translateY(-2px);
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
 }
@@ -87,7 +87,7 @@
 .hint {
   margin: 0;
   font-size: 12px;
-  color: #999;
+  color: var(--muted);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 

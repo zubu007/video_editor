@@ -19,7 +19,7 @@ def detect_audio_pauses(
     video_path: str,
     min_silence_duration: float = 1.0,
     silence_threshold: int = -40,
-    seek_step: int = 1
+    seek_step: int = 1,
 ) -> List[dict]:
     """
     Detects audio pauses/silence in a video file.
@@ -51,45 +51,43 @@ def detect_audio_pauses(
     """
     # Extract audio to temporary WAV file
     temp_audio_path = None
-    
+
     try:
         # Create temporary file for extracted audio
-        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         temp_audio_path = temp_file.name
         temp_file.close()
-        
+
         # Extract audio from video using centralized extraction
         extract_audio_as_wav(video_path, temp_audio_path)
-        
+
         # Load the audio file
         audio = AudioSegment.from_wav(temp_audio_path)
-        
+
         # Convert min_silence_duration to milliseconds
         min_silence_ms = int(min_silence_duration * 1000)
-        
+
         # Detect silence using pydub
         silence_ranges = detect_silence(
             audio,
             min_silence_len=min_silence_ms,
             silence_thresh=silence_threshold,
-            seek_step=seek_step
+            seek_step=seek_step,
         )
-        
+
         # Convert to our format with seconds
         pauses = []
         for start_ms, end_ms in silence_ranges:
             start_sec = start_ms / 1000.0
             end_sec = end_ms / 1000.0
             duration_sec = end_sec - start_sec
-            
-            pauses.append({
-                "start": start_sec,
-                "end": end_sec,
-                "duration": duration_sec
-            })
-        
+
+            pauses.append(
+                {"start": start_sec, "end": end_sec, "duration": duration_sec}
+            )
+
         return pauses
-        
+
     finally:
         # Clean up temporary audio file
         if temp_audio_path and os.path.exists(temp_audio_path):
@@ -103,7 +101,7 @@ def detect_audio_pauses_from_wav(
     wav_path: str,
     min_silence_duration: float = 1.0,
     silence_threshold: int = -40,
-    seek_step: int = 1
+    seek_step: int = 1,
 ) -> List[dict]:
     """
     Detects audio pauses/silence from a WAV file.
@@ -121,41 +119,37 @@ def detect_audio_pauses_from_wav(
     """
     if not os.path.exists(wav_path):
         raise FileNotFoundError(f"WAV file not found: {wav_path}")
-    
+
     # Load the audio file
     audio = AudioSegment.from_wav(wav_path)
-    
+
     # Convert min_silence_duration to milliseconds
     min_silence_ms = int(min_silence_duration * 1000)
-    
+
     # Detect silence
     silence_ranges = detect_silence(
         audio,
         min_silence_len=min_silence_ms,
         silence_thresh=silence_threshold,
-        seek_step=seek_step
+        seek_step=seek_step,
     )
-    
+
     # Convert to seconds
     pauses = []
     for start_ms, end_ms in silence_ranges:
         start_sec = start_ms / 1000.0
         end_sec = end_ms / 1000.0
         duration_sec = end_sec - start_sec
-        
-        pauses.append({
-            "start": start_sec,
-            "end": end_sec,
-            "duration": duration_sec
-        })
-    
+
+        pauses.append({"start": start_sec, "end": end_sec, "duration": duration_sec})
+
     return pauses
 
 
 def filter_pauses_by_duration(
     pauses: List[dict],
     min_duration: Optional[float] = None,
-    max_duration: Optional[float] = None
+    max_duration: Optional[float] = None,
 ) -> List[dict]:
     """
     Filters pause segments by duration.
@@ -169,13 +163,13 @@ def filter_pauses_by_duration(
         list: Filtered list of pauses.
     """
     filtered = pauses
-    
+
     if min_duration is not None:
-        filtered = [p for p in filtered if p['duration'] >= min_duration]
-    
+        filtered = [p for p in filtered if p["duration"] >= min_duration]
+
     if max_duration is not None:
-        filtered = [p for p in filtered if p['duration'] <= max_duration]
-    
+        filtered = [p for p in filtered if p["duration"] <= max_duration]
+
     return filtered
 
 
@@ -189,7 +183,7 @@ def get_total_silence_duration(pauses: List[dict]) -> float:
     Returns:
         float: Total silence duration in seconds.
     """
-    return sum(p['duration'] for p in pauses)
+    return sum(p["duration"] for p in pauses)
 
 
 def merge_nearby_pauses(pauses: List[dict], max_gap: float = 0.5) -> List[dict]:
@@ -206,26 +200,26 @@ def merge_nearby_pauses(pauses: List[dict], max_gap: float = 0.5) -> List[dict]:
     """
     if not pauses:
         return []
-    
+
     # Sort by start time
-    sorted_pauses = sorted(pauses, key=lambda x: x['start'])
-    
+    sorted_pauses = sorted(pauses, key=lambda x: x["start"])
+
     merged = []
     current = sorted_pauses[0].copy()
-    
+
     for pause in sorted_pauses[1:]:
-        gap = pause['start'] - current['end']
-        
+        gap = pause["start"] - current["end"]
+
         if gap <= max_gap:
             # Merge with current
-            current['end'] = pause['end']
-            current['duration'] = current['end'] - current['start']
+            current["end"] = pause["end"]
+            current["duration"] = current["end"] - current["start"]
         else:
             # Save current and start new segment
             merged.append(current)
             current = pause.copy()
-    
+
     # Add the last segment
     merged.append(current)
-    
+
     return merged

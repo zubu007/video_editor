@@ -15,6 +15,7 @@ function VideoControls({
   isFullscreen,
   buffering,
   waveformData,
+  rangeMarkers,
   onPlayPause,
   onSeek,
   onVolumeChange,
@@ -30,6 +31,7 @@ function VideoControls({
         onSeek={onSeek}
         buffering={buffering}
         waveformData={waveformData}
+        rangeMarkers={rangeMarkers}
       />
       <TimeDisplay currentTime={currentTime} duration={duration} />
       <VolumeControl

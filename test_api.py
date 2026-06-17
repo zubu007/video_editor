@@ -49,19 +49,19 @@ def main():
     print("Video Editor API - Quick Test")
     print("=" * 60)
     print()
-    
+
     try:
         test_health_check()
         test_root_endpoint()
         test_docs_available()
-        
+
         print("=" * 60)
         print("All tests passed! ✓")
         print("=" * 60)
         print()
         print("The API is running correctly.")
         print("Visit http://localhost:8000/docs for interactive documentation.")
-        
+
     except requests.exceptions.ConnectionError:
         print("❌ Error: Could not connect to the API server.")
         print("Please make sure the server is running:")

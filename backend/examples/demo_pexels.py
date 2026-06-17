@@ -1,6 +1,6 @@
 """Example script demonstrating Pexels stock footage download."""
 
-from features.pexels import download_stock_footage
+from backend.features.pexels import download_stock_footage
 
 
 def main() -> None:
@@ -12,7 +12,9 @@ def main() -> None:
 
     # Example 2: Download a random nature video in SD quality
     print("\nDownloading nature footage...")
-    video_path = download_stock_footage("forest nature", quality="sd", output_dir="downloads/nature")
+    video_path = download_stock_footage(
+        "forest nature", quality="sd", output_dir="downloads/nature"
+    )
     print(f"✓ Downloaded video to: {video_path}")
 
     # Example 3: Download a random city video

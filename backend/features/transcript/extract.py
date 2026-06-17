@@ -1,5 +1,5 @@
 from faster_whisper import WhisperModel
-import ffmpeg
+
 
 def extract_transcript_as_segments(video_path: str, model_size: str = "base") -> list:
     """
@@ -7,7 +7,7 @@ def extract_transcript_as_segments(video_path: str, model_size: str = "base") ->
 
     Args:
         video_path (str): The path to the video file.
-        model_size (str, optional): The size of the whisper model to use. 
+        model_size (str, optional): The size of the whisper model to use.
                                     Defaults to "base".
 
     Returns:
@@ -18,18 +18,20 @@ def extract_transcript_as_segments(video_path: str, model_size: str = "base") ->
 
     segments, info = model.transcribe(video_path, beam_size=5)
 
-    print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+    print(
+        "Detected language '%s' with probability %f"
+        % (info.language, info.language_probability)
+    )
 
     transcript = []
     for segment in segments:
-        transcript.append({
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text
-        })
+        transcript.append(
+            {"start": segment.start, "end": segment.end, "text": segment.text}
+        )
         print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
-    
+
     return transcript
+
 
 def extract_transcript_as_sentences(video_path: str, model_size: str = "base") -> list:
     """
@@ -48,7 +50,10 @@ def extract_transcript_as_sentences(video_path: str, model_size: str = "base") -
 
     segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
 
-    print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+    print(
+        "Detected language '%s' with probability %f"
+        % (info.language, info.language_probability)
+    )
 
     sentences = []
     current_sentence = None
@@ -59,13 +64,13 @@ def extract_transcript_as_sentences(video_path: str, model_size: str = "base") -
                 current_sentence = {
                     "start": word.start,
                     "end": word.end,
-                    "text": word.word
+                    "text": word.word,
                 }
             else:
                 current_sentence["end"] = word.end
                 current_sentence["text"] += word.word
 
-            if word.word.endswith(('.', '?', '!')):
+            if word.word.endswith((".", "?", "!")):
                 sentences.append(current_sentence)
                 current_sentence = None
 
@@ -73,9 +78,13 @@ def extract_transcript_as_sentences(video_path: str, model_size: str = "base") -
         sentences.append(current_sentence)
 
     for sentence in sentences:
-        print("[%.2fs -> %.2fs] %s" % (sentence["start"], sentence["end"], sentence["text"]))
+        print(
+            "[%.2fs -> %.2fs] %s"
+            % (sentence["start"], sentence["end"], sentence["text"])
+        )
 
     return sentences
+
 
 def extract_transcript_as_words(video_path: str, model_size: str = "base") -> list:
     """
@@ -94,17 +103,14 @@ def extract_transcript_as_words(video_path: str, model_size: str = "base") -> li
 
     segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
 
-    print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+    print(
+        "Detected language '%s' with probability %f"
+        % (info.language, info.language_probability)
+    )
 
     words = []
     for segment in segments:
         for word in segment.words:
-            words.append({
-                "start": word.start,
-                "end": word.end,
-                "word": word.word
-            })
+            words.append({"start": word.start, "end": word.end, "word": word.word})
 
     return words
-
-

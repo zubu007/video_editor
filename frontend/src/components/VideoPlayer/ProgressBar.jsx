@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { formatTime, getProgressPercentage, getTimeFromPercentage } from '../../utils/timeFormat';
 import styles from './ProgressBar.module.css';
 
@@ -10,7 +10,7 @@ function ProgressBar({ currentTime, duration, onSeek, buffering }) {
 
   const progress = getProgressPercentage(currentTime, duration);
 
-  const handleSeek = (clientX) => {
+  const handleSeek = useCallback((clientX) => {
     if (!progressBarRef.current || !duration) return;
 
     const rect = progressBarRef.current.getBoundingClientRect();
@@ -18,7 +18,7 @@ function ProgressBar({ currentTime, duration, onSeek, buffering }) {
     const time = getTimeFromPercentage(percentage, duration);
     
     onSeek(time);
-  };
+  }, [duration, onSeek]);
 
   const handleMouseDown = (e) => {
     setIsDragging(true);
@@ -62,7 +62,7 @@ function ProgressBar({ currentTime, duration, onSeek, buffering }) {
         document.removeEventListener('mouseup', handleGlobalMouseUp);
       };
     }
-  }, [isDragging]);
+  }, [handleSeek, isDragging]);
 
   return (
     <div className={styles.progressBarContainer}>

@@ -1,42 +1,141 @@
-import os
+import subprocess
+import tempfile
 import unittest
-from backend.features.video_cutter.cut import cut_filler_words
-from moviepy.editor import VideoFileClip
+from pathlib import Path
+
+from backend.features.video_cutter.cut import cut_filler_words, render_with_edits
+from moviepy import VideoFileClip
+
 
 class TestVideoCutter(unittest.TestCase):
-
     def setUp(self):
-        self.video_path = "tests/test_video_for_cutting.mp4"
-        self.output_path = "tests/test_video_for_cutting_edited.mp4"
-        if not os.path.exists(self.video_path):
-            os.system(f"ffmpeg -f lavfi -i color=c=black:s=1280x720:r=30:d=10 -f lavfi -i anullsrc=r=48000:cl=stereo -c:v libx264 -c:a aac -shortest {self.video_path}")
+        self.temp_dir = tempfile.TemporaryDirectory()
+        test_dir = Path(self.temp_dir.name)
+        self.video_path = test_dir / "test_video_for_cutting.mp4"
+        self.output_path = test_dir / "test_video_for_cutting_edited.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=1280x720:r=30:d=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-shortest",
+                str(self.video_path),
+            ],
+            check=True,
+        )
 
     def test_cut_filler_words(self):
         filler_word_ranges = [
-            {'start': 1, 'end': 2},
-            {'start': 5, 'end': 6},
-            {'start': 8, 'end': 9},
+            {"start": 1, "end": 2},
+            {"start": 5, "end": 6},
+            {"start": 8, "end": 9},
         ]
 
         # Get original duration
-        original_duration = VideoFileClip(self.video_path).duration
+        original_duration = VideoFileClip(str(self.video_path)).duration
 
         # Cut the video
-        cut_filler_words(self.video_path, filler_word_ranges, self.output_path)
+        cut_filler_words(
+            str(self.video_path), filler_word_ranges, str(self.output_path)
+        )
 
         # Check that the output file exists
-        self.assertTrue(os.path.exists(self.output_path))
+        self.assertTrue(self.output_path.exists())
 
         # Check the duration of the edited video
-        edited_duration = VideoFileClip(self.output_path).duration
+        edited_duration = VideoFileClip(str(self.output_path)).duration
         expected_duration = original_duration - 3  # 3 seconds of filler words
         self.assertAlmostEqual(edited_duration, expected_duration, delta=0.5)
 
-    def tearDown(self):
-        if os.path.exists(self.video_path):
-            os.remove(self.video_path)
-        if os.path.exists(self.output_path):
-            os.remove(self.output_path)
+    def test_render_with_zoom_preserves_dimensions_and_duration(self):
+        original = VideoFileClip(str(self.video_path))
+        original_duration = original.duration
+        original_size = (original.w, original.h)
 
-if __name__ == '__main__':
+        # Zoom into the middle of the clip, no cuts.
+        render_with_edits(
+            str(self.video_path),
+            [],
+            [{"start": 3, "end": 6, "level": 1.5}],
+            str(self.output_path),
+        )
+
+        self.assertTrue(self.output_path.exists())
+        rendered = VideoFileClip(str(self.output_path))
+        # A pure zoom must not change the timeline or the frame size.
+        self.assertAlmostEqual(rendered.duration, original_duration, delta=0.5)
+        self.assertEqual((rendered.w, rendered.h), original_size)
+
+    def test_render_with_cut_and_zoom(self):
+        original_duration = VideoFileClip(str(self.video_path)).duration
+
+        render_with_edits(
+            str(self.video_path),
+            [{"start": 1, "end": 2}],
+            [{"start": 4, "end": 7, "level": 1.3}],
+            str(self.output_path),
+        )
+
+        self.assertTrue(self.output_path.exists())
+        edited_duration = VideoFileClip(str(self.output_path)).duration
+        # One second removed; the zoom does not affect duration.
+        self.assertAlmostEqual(edited_duration, original_duration - 1, delta=0.5)
+
+    def _make_clip(self, path: Path, color: str, duration: int = 4) -> None:
+        """Render a solid-color silent test clip with ffmpeg."""
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-f", "lavfi",
+                "-i", f"color=c={color}:s=640x360:r=30:d={duration}",
+                "-c:v", "libx264",
+                str(path),
+            ],
+            check=True,
+        )
+
+    def test_render_with_stock_footage_overlays_broll(self):
+        original = VideoFileClip(str(self.video_path))
+        original_duration = original.duration
+        original_size = (original.w, original.h)
+
+        stock_path = Path(self.temp_dir.name) / "stock_red.mp4"
+        self._make_clip(stock_path, "red")
+
+        # Overlay the (red) B-roll over a span of the (black) source.
+        render_with_edits(
+            str(self.video_path),
+            [],
+            [],
+            str(self.output_path),
+            [{"start": 3, "end": 6, "footage_path": str(stock_path)}],
+        )
+
+        self.assertTrue(self.output_path.exists())
+        rendered = VideoFileClip(str(self.output_path))
+        # An overlay must not change the timeline or the frame size.
+        self.assertAlmostEqual(rendered.duration, original_duration, delta=0.5)
+        self.assertEqual((rendered.w, rendered.h), original_size)
+        # The overlaid span should show the red B-roll, not the black source.
+        overlaid = rendered.get_frame(4.5)
+        self.assertGreater(int(overlaid[..., 0].mean()), 100)
+        # Outside the overlay the source stays black.
+        source = rendered.get_frame(1.0)
+        self.assertLess(int(source.mean()), 40)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+
+if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ from backend.features.pexels.download import (
 class TestGetAPIKey:
     """Tests for _get_api_key function."""
 
-    @patch("features.pexels.download.load_dotenv")
+    @patch("backend.features.pexels.download.load_dotenv")
     @patch.dict(os.environ, {"PEXELS_API_KEY": "test_key_123"})
     def test_get_api_key_success(self, mock_load_dotenv: MagicMock) -> None:
         """Test successful retrieval of API key."""
@@ -28,7 +28,7 @@ class TestGetAPIKey:
         assert result == "test_key_123"
         mock_load_dotenv.assert_called_once()
 
-    @patch("features.pexels.download.load_dotenv")
+    @patch("backend.features.pexels.download.load_dotenv")
     @patch.dict(os.environ, {}, clear=True)
     def test_get_api_key_missing(self, mock_load_dotenv: MagicMock) -> None:
         """Test error when API key is missing."""
@@ -39,7 +39,7 @@ class TestGetAPIKey:
 class TestSearchVideos:
     """Tests for _search_videos function."""
 
-    @patch("features.pexels.download.requests.get")
+    @patch("backend.features.pexels.download.requests.get")
     def test_search_videos_success(self, mock_get: MagicMock) -> None:
         """Test successful video search."""
         mock_response = MagicMock()
@@ -54,10 +54,11 @@ class TestSearchVideos:
         assert len(result["videos"]) == 1
         mock_get.assert_called_once()
 
-    @patch("features.pexels.download.requests.get")
+    @patch("backend.features.pexels.download.requests.get")
     def test_search_videos_api_error(self, mock_get: MagicMock) -> None:
         """Test API error handling during search."""
         import requests
+
         mock_get.side_effect = requests.exceptions.RequestException("API Error")
 
         with pytest.raises(PexelsAPIError, match="Failed to search Pexels API"):
@@ -67,10 +68,8 @@ class TestSearchVideos:
 class TestDownloadVideo:
     """Tests for _download_video function."""
 
-    @patch("features.pexels.download.requests.get")
-    def test_download_video_success(
-        self, mock_get: MagicMock, tmp_path: Path
-    ) -> None:
+    @patch("backend.features.pexels.download.requests.get")
+    def test_download_video_success(self, mock_get: MagicMock, tmp_path: Path) -> None:
         """Test successful video download."""
         mock_response = MagicMock()
         mock_response.iter_content.return_value = [b"chunk1", b"chunk2"]
@@ -84,10 +83,11 @@ class TestDownloadVideo:
             content = f.read()
         assert content == b"chunk1chunk2"
 
-    @patch("features.pexels.download.requests.get")
+    @patch("backend.features.pexels.download.requests.get")
     def test_download_video_error(self, mock_get: MagicMock, tmp_path: Path) -> None:
         """Test error handling during video download."""
         import requests
+
         mock_get.side_effect = requests.exceptions.RequestException("Download Error")
 
         output_path = tmp_path / "test_video.mp4"
@@ -98,9 +98,9 @@ class TestDownloadVideo:
 class TestDownloadStockFootage:
     """Tests for download_stock_footage function."""
 
-    @patch("features.pexels.download._download_video")
-    @patch("features.pexels.download._search_videos")
-    @patch("features.pexels.download._get_api_key")
+    @patch("backend.features.pexels.download._download_video")
+    @patch("backend.features.pexels.download._search_videos")
+    @patch("backend.features.pexels.download._get_api_key")
     def test_download_stock_footage_success(
         self,
         mock_get_api_key: MagicMock,
@@ -126,8 +126,8 @@ class TestDownloadStockFootage:
         assert "pexels_ocean_12345.mp4" in result
         mock_download_video.assert_called_once()
 
-    @patch("features.pexels.download._search_videos")
-    @patch("features.pexels.download._get_api_key")
+    @patch("backend.features.pexels.download._search_videos")
+    @patch("backend.features.pexels.download._get_api_key")
     def test_download_stock_footage_no_videos(
         self, mock_get_api_key: MagicMock, mock_search_videos: MagicMock
     ) -> None:
@@ -138,7 +138,7 @@ class TestDownloadStockFootage:
         with pytest.raises(ValueError, match="No videos found for search term"):
             download_stock_footage("nonexistent_term")
 
-    @patch("features.pexels.download._get_api_key")
+    @patch("backend.features.pexels.download._get_api_key")
     def test_download_stock_footage_invalid_quality(
         self, mock_get_api_key: MagicMock
     ) -> None:
@@ -148,9 +148,9 @@ class TestDownloadStockFootage:
         with pytest.raises(ValueError, match="Invalid quality"):
             download_stock_footage("ocean", quality="ultra_hd")
 
-    @patch("features.pexels.download._download_video")
-    @patch("features.pexels.download._search_videos")
-    @patch("features.pexels.download._get_api_key")
+    @patch("backend.features.pexels.download._download_video")
+    @patch("backend.features.pexels.download._search_videos")
+    @patch("backend.features.pexels.download._get_api_key")
     def test_download_stock_footage_quality_fallback(
         self,
         mock_get_api_key: MagicMock,

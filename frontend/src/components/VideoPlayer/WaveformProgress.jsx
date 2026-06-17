@@ -1,8 +1,8 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { formatTime } from '../../utils/timeFormat';
 import styles from './WaveformProgress.module.css';
 
-function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformData }) {
+function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformData, rangeMarkers = [] }) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -103,7 +103,7 @@ function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformDa
     setIsDragging(false);
   };
 
-  const handleSeekToPosition = (e) => {
+  const handleSeekToPosition = useCallback((e) => {
     const container = containerRef.current;
     if (!container) return;
 
@@ -113,7 +113,7 @@ function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformDa
     const time = percentage * duration;
 
     onSeek(time);
-  };
+  }, [duration, onSeek]);
 
   useEffect(() => {
     if (isDragging) {
@@ -133,7 +133,7 @@ function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformDa
         document.removeEventListener('mouseup', handleGlobalMouseUp);
       };
     }
-  }, [isDragging, duration, onSeek]);
+  }, [handleSeekToPosition, isDragging]);
 
   // Show loading state if no waveform data
   if (!waveformData || waveformData.length === 0) {
@@ -163,6 +163,31 @@ function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformDa
         onMouseUp={handleMouseUp}
       >
         <canvas ref={canvasRef} className={styles.canvas} />
+
+        {duration > 0 && rangeMarkers.map((marker) => {
+          const left = Math.max(0, Math.min(100, (marker.start / duration) * 100));
+          const right = Math.max(0, Math.min(100, (marker.end / duration) * 100));
+          const width = Math.max(0.3, right - left);
+          const markerClass = marker.enabled === false
+            ? styles.disabledRange
+            : marker.kind === 'stored'
+              ? styles.storedRange
+              : styles.proposedRange;
+
+          return (
+            <button
+              key={marker.id}
+              type="button"
+              className={`${styles.rangeMarker} ${markerClass}`}
+              style={{ left: `${left}%`, width: `${width}%` }}
+              title={marker.label}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSeek(marker.start);
+              }}
+            />
+          );
+        })}
 
         {hoverTime !== null && hoverX !== null && (
           <div

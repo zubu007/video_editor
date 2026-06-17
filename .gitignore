@@ -14,10 +14,21 @@ temp/uploads/*
 temp/outputs/*
 !temp/uploads/.gitkeep
 !temp/outputs/.gitkeep
+data/*.db
+data/*.db-*
 
 # Log files
 *.log
 nohup.out
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+
+# Node (root-level safety; frontend has its own .gitignore)
+node_modules/
 
 # IDE
 .vscode/
@@ -29,5 +40,10 @@ nohup.out
 .DS_Store
 Thumbs.db
 
-# Environment variables
-.env.local
+# Environment variables — never commit secrets (API keys live here)
+.env
+.env.*
+!.env.example
+
+# Vendored external tools (cloned locally with their own venv, not committed)
+third_party/

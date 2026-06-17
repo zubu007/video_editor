@@ -39,7 +39,9 @@ def _get_api_key() -> str:
     return api_key
 
 
-def _search_videos(search_term: str, api_key: str, per_page: int = 15) -> dict[str, Any]:
+def _search_videos(
+    search_term: str, api_key: str, per_page: int = 15
+) -> dict[str, Any]:
     """Search for videos on Pexels API.
 
     Args:
@@ -156,7 +158,9 @@ def download_stock_footage(
         raise ValueError("Video download link not found")
 
     # Create output filename
-    output_path = Path(output_dir) / f"pexels_{search_term.replace(' ', '_')}_{video_id}.mp4"
+    output_path = (
+        Path(output_dir) / f"pexels_{search_term.replace(' ', '_')}_{video_id}.mp4"
+    )
 
     logger.info(
         f"Downloading video (ID: {video_id}, Quality: {selected_file.get('quality')})"
