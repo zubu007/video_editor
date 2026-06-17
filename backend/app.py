@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -21,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from moviepy import VideoFileClip
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -47,13 +48,24 @@ from backend.features.transcript.extract import (
     extract_transcript_as_sentences,
     extract_transcript_as_words,
 )
+from backend.features.project_io import (
+    PROJECT_FILE_EXTENSION,
+    ProjectFile,
+    build_project_file,
+    load_project_file,
+)
+from backend.features.project_io.import_ import ProjectFileError
 from backend.features.video_cutter.cut import cut_filler_words, render_with_edits
 from backend.storage.database import (
+    EditingPlan,
     EditOperation,
     MediaAsset,
     Project,
+    StockFootage,
+    get_latest_editing_plan,
     get_project,
     get_session,
+    get_stock_footage,
     init_db,
     touch_project,
     utc_now,
@@ -297,6 +309,88 @@ class RenderResponse(BaseModel):
     applied_edits: int
 
 
+class EditingPlanSaveRequest(BaseModel):
+    """Request model for saving a project's editing plan."""
+
+    plan: list[Any] = Field(default_factory=list, description="Editing decisions")
+    options: dict[str, Any] = Field(
+        default_factory=dict, description="Options used to generate the plan"
+    )
+    media_asset_id: Optional[str] = None
+
+
+class EditingPlanRecordResponse(BaseModel):
+    """Response model for a stored editing plan."""
+
+    id: str
+    project_id: str
+    media_asset_id: Optional[str] = None
+    plan: list[Any] = Field(default_factory=list)
+    options: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class StockFootageCreate(BaseModel):
+    """Request model for registering a downloaded stock-footage clip."""
+
+    filename: str
+    path: str
+    source: str = "pexels"
+    query: Optional[str] = None
+    provider_id: Optional[str] = None
+    duration: Optional[float] = None
+    size: Optional[int] = None
+
+
+class StockFootageRecordResponse(BaseModel):
+    """Response model for a stored stock-footage clip."""
+
+    id: str
+    project_id: str
+    filename: str
+    path: str
+    source: str
+    query: Optional[str] = None
+    provider_id: Optional[str] = None
+    duration: Optional[float] = None
+    size: Optional[int] = None
+    created_at: datetime
+
+
+class StockFootageListResponse(BaseModel):
+    """Response model for a project's stock-footage clips."""
+
+    footage: list[StockFootageRecordResponse] = Field(default_factory=list)
+
+
+class MissingMediaResponse(BaseModel):
+    """A referenced file that could not be resolved when importing a project."""
+
+    file_id: Optional[str] = None
+    filename: str
+    kind: str
+    expected_abs: Optional[str] = None
+    expected_rel: Optional[str] = None
+
+
+class ProjectImportResponse(BaseModel):
+    """Response model for importing a .vedit project file."""
+
+    project_id: str
+    relinked: list[str] = Field(default_factory=list)
+    missing: list[MissingMediaResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RelinkRequest(BaseModel):
+    """Request model for relinking missing media to new on-disk paths."""
+
+    media: dict[str, str] = Field(
+        default_factory=dict, description="Map of file_id -> new source path"
+    )
+
+
 class CaptionRemovalStartResponse(BaseModel):
     """Response model for starting a caption removal job."""
 
@@ -394,6 +488,14 @@ def find_uploaded_video(file_id: str) -> Path:
             return candidate
 
     raise FileNotFoundError(f"Video not found for file_id: {file_id}")
+
+
+def resolve_media_path(file_id: str) -> Path | None:
+    """Return the on-disk path for a file_id, or None if it cannot be found."""
+    try:
+        return find_uploaded_video(file_id)
+    except FileNotFoundError:
+        return None
 
 
 def get_video_duration(video_path: Path) -> float | None:
@@ -869,6 +971,238 @@ async def render_project(
         filename=output_filename,
         applied_edits=len(cut_ranges) + len(zoom_ranges) + len(stock_footage_ranges),
     )
+
+
+def _editing_plan_to_response(plan: EditingPlan) -> EditingPlanRecordResponse:
+    """Convert a stored editing plan into its API response shape."""
+    return EditingPlanRecordResponse(
+        id=plan.id,
+        project_id=plan.project_id,
+        media_asset_id=plan.media_asset_id,
+        plan=plan.plan or [],
+        options=plan.options or {},
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+    )
+
+
+def _stock_footage_to_response(clip: StockFootage) -> StockFootageRecordResponse:
+    """Convert a stored stock-footage clip into its API response shape."""
+    return StockFootageRecordResponse(
+        id=clip.id,
+        project_id=clip.project_id,
+        filename=clip.filename,
+        path=clip.path,
+        source=clip.source,
+        query=clip.query,
+        provider_id=clip.provider_id,
+        duration=clip.duration,
+        size=clip.size,
+        created_at=clip.created_at,
+    )
+
+
+@app.put(
+    "/api/projects/{project_id}/editing-plan",
+    response_model=EditingPlanRecordResponse,
+)
+async def save_project_editing_plan(
+    project_id: str,
+    request: EditingPlanSaveRequest,
+    session: Session = Depends(get_session),
+):
+    """Save (replace) the working editing plan for a project."""
+    project = ensure_project(session, project_id)
+
+    plan = get_latest_editing_plan(session, project_id)
+    if plan is None:
+        plan = EditingPlan(project_id=project_id)
+        session.add(plan)
+    plan.plan = request.plan
+    plan.options = request.options
+    plan.media_asset_id = request.media_asset_id
+    plan.updated_at = utc_now()
+
+    touch_project(session, project)
+    session.commit()
+    session.refresh(plan)
+    return _editing_plan_to_response(plan)
+
+
+@app.get(
+    "/api/projects/{project_id}/editing-plan",
+    response_model=EditingPlanRecordResponse,
+)
+async def get_project_editing_plan(
+    project_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get the working editing plan for a project."""
+    ensure_project(session, project_id)
+    plan = get_latest_editing_plan(session, project_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No editing plan saved")
+    return _editing_plan_to_response(plan)
+
+
+@app.get(
+    "/api/projects/{project_id}/stock-footage",
+    response_model=StockFootageListResponse,
+)
+async def list_project_stock_footage(
+    project_id: str,
+    session: Session = Depends(get_session),
+):
+    """List stock-footage clips registered for a project."""
+    ensure_project(session, project_id)
+    clips = get_stock_footage(session, project_id)
+    return StockFootageListResponse(
+        footage=[_stock_footage_to_response(clip) for clip in clips]
+    )
+
+
+@app.post(
+    "/api/projects/{project_id}/stock-footage",
+    response_model=StockFootageRecordResponse,
+)
+async def add_project_stock_footage(
+    project_id: str,
+    request: StockFootageCreate,
+    session: Session = Depends(get_session),
+):
+    """Register a downloaded stock-footage clip with a project."""
+    project = ensure_project(session, project_id)
+    clip = StockFootage(
+        project_id=project_id,
+        filename=request.filename,
+        path=request.path,
+        source=request.source,
+        query=request.query,
+        provider_id=request.provider_id,
+        duration=request.duration,
+        size=request.size,
+    )
+    session.add(clip)
+    touch_project(session, project)
+    session.commit()
+    session.refresh(clip)
+    return _stock_footage_to_response(clip)
+
+
+@app.get("/api/projects/{project_id}/export")
+async def export_project(
+    project_id: str,
+    session: Session = Depends(get_session),
+):
+    """Export a project as a downloadable ``.vedit`` file.
+
+    The file references source media by path; it does not embed the video.
+    """
+    ensure_project(session, project_id)
+    try:
+        document = build_project_file(session, project_id, resolve_media_path)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    payload = document.model_dump_json(indent=2)
+    safe_name = (
+        "".join(c if c.isalnum() or c in "-_ " else "_" for c in document.project.name)
+        .strip()
+        .replace(" ", "_")
+        or "project"
+    )
+    filename = f"{safe_name}{PROJECT_FILE_EXTENSION}"
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/projects/import", response_model=ProjectImportResponse)
+async def import_project(
+    project_file: UploadFile = File(..., description="A .vedit project file"),
+    session: Session = Depends(get_session),
+):
+    """Import a ``.vedit`` file, recreating the project and relinking media."""
+    raw = await project_file.read()
+    try:
+        document = ProjectFile.model_validate_json(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid project file: {e}")
+
+    try:
+        result = load_project_file(
+            session,
+            document,
+            upload_dir=UPLOAD_DIR,
+            output_dir=OUTPUT_DIR,
+        )
+    except ProjectFileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return ProjectImportResponse(
+        project_id=result.project_id,
+        relinked=result.relinked,
+        missing=[
+            MissingMediaResponse(
+                file_id=m.file_id,
+                filename=m.filename,
+                kind=m.kind,
+                expected_abs=m.expected_abs,
+                expected_rel=m.expected_rel,
+            )
+            for m in result.missing
+        ],
+        warnings=result.warnings,
+    )
+
+
+@app.post("/api/projects/{project_id}/relink", response_model=ProjectImportResponse)
+async def relink_project_media(
+    project_id: str,
+    request: RelinkRequest,
+    session: Session = Depends(get_session),
+):
+    """Relink a project's missing source media to new on-disk paths.
+
+    For each ``file_id -> path`` entry, the file is copied into the upload dir
+    under that file_id so the existing project resolves it. Unresolved entries
+    are returned in ``missing``.
+    """
+    ensure_project(session, project_id)
+    result = ProjectImportResponse(project_id=project_id)
+
+    for file_id, new_path in request.media.items():
+        asset = session.exec(
+            select(MediaAsset).where(
+                MediaAsset.project_id == project_id,
+                MediaAsset.file_id == file_id,
+            )
+        ).first()
+        if asset is None:
+            result.warnings.append(f"No media asset {file_id} in this project")
+            continue
+
+        source = Path(new_path)
+        if not source.exists():
+            result.missing.append(
+                MissingMediaResponse(
+                    file_id=file_id,
+                    filename=asset.filename,
+                    kind="media",
+                    expected_abs=new_path,
+                )
+            )
+            continue
+
+        dest = UPLOAD_DIR / f"{file_id}{source.suffix}"
+        if source.resolve() != dest.resolve():
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+        result.relinked.append(file_id)
+
+    return result
 
 
 @app.get("/api/renders/{filename}")
@@ -1366,8 +1700,13 @@ async def generate_editing_plan_endpoint(
 async def generate_editing_plan_by_id(
     file_id: str,
     request: EditingPlanRequest,
+    session: Session = Depends(get_session),
 ):
-    """Generate an AI-powered editing plan for a previously uploaded video."""
+    """Generate an AI-powered editing plan for a previously uploaded video.
+
+    When the file belongs to a project, the generated plan is also saved to the
+    project so it is captured in exports.
+    """
     try:
         video_path = find_uploaded_video(file_id)
         logger.info(f"Extracting transcript from {video_path.name}")
@@ -1380,6 +1719,29 @@ async def generate_editing_plan_by_id(
             model=request.llm_model,
             additional_context=request.additional_context,
         )
+
+        # Persist the plan to the owning project (best-effort) so it survives in
+        # project exports and reloads.
+        asset = session.exec(
+            select(MediaAsset).where(MediaAsset.file_id == file_id)
+        ).first()
+        if asset is not None:
+            project = get_project(session, asset.project_id)
+            if project is not None:
+                plan = get_latest_editing_plan(session, project.id)
+                if plan is None:
+                    plan = EditingPlan(project_id=project.id)
+                    session.add(plan)
+                plan.plan = editing_plan
+                plan.options = {
+                    "model_size": request.model_size,
+                    "llm_model": request.llm_model,
+                    "additional_context": request.additional_context,
+                }
+                plan.media_asset_id = asset.id
+                plan.updated_at = utc_now()
+                touch_project(session, project)
+                session.commit()
 
         return EditingPlanResponse(editing_plan=editing_plan)
     except FileNotFoundError as e:

@@ -60,6 +60,43 @@ class EditOperation(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class EditingPlan(SQLModel, table=True):
+    """A generated AI editing plan saved for a project.
+
+    Stores the LLM-produced list of editing decisions plus the options used to
+    generate it. A project may keep several plans; the most recent one is the
+    working plan.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="project.id", index=True)
+    media_asset_id: str | None = Field(default=None, foreign_key="mediaasset.id")
+    plan: list[Any] = Field(default_factory=list, sa_column=Column(JSON))
+    options: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class StockFootage(SQLModel, table=True):
+    """A stock-footage clip downloaded for a project.
+
+    Tracks B-roll pulled from Pexels (or similar) so a project's footage can be
+    saved/restored. The file itself lives under ``temp/outputs/``; ``path`` is the
+    on-disk location referenced by render and project files.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="project.id", index=True)
+    filename: str
+    path: str
+    source: str = "pexels"
+    query: str | None = None
+    provider_id: str | None = None
+    duration: float | None = None
+    size: int | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 def init_db() -> None:
     """Create database tables."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,3 +124,25 @@ def touch_project(session: Session, project: Project) -> None:
     """Update a project's modification timestamp."""
     project.updated_at = utc_now()
     session.add(project)
+
+
+def get_latest_editing_plan(
+    session: Session, project_id: str
+) -> EditingPlan | None:
+    """Return the most recently updated editing plan for a project, if any."""
+    statement = (
+        select(EditingPlan)
+        .where(EditingPlan.project_id == project_id)
+        .order_by(EditingPlan.updated_at.desc())
+    )
+    return session.exec(statement).first()
+
+
+def get_stock_footage(session: Session, project_id: str) -> list[StockFootage]:
+    """Return all stock-footage clips registered for a project."""
+    statement = (
+        select(StockFootage)
+        .where(StockFootage.project_id == project_id)
+        .order_by(StockFootage.created_at)
+    )
+    return list(session.exec(statement).all())
