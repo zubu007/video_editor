@@ -295,6 +295,65 @@ export async function getCaptionRemovalStatus(jobId) {
 }
 
 /**
+ * Start a background job that imports a single video from YouTube.
+ * @param {string} url - YouTube video URL
+ * @param {{ projectId?: string, projectName?: string }} [options]
+ * @returns {Promise<{job_id: string, status: string}>}
+ */
+export async function downloadYouTube(url, { projectId, projectName } = {}) {
+  const response = await apiClient.post('/api/video/download-youtube', {
+    url,
+    project_id: projectId ?? null,
+    project_name: projectName ?? null,
+  });
+  return response.data;
+}
+
+/**
+ * Poll the status of a YouTube download job.
+ * @param {string} jobId - Job ID returned by downloadYouTube
+ * @returns {Promise<{job_id: string, status: string, progress: number, file_id: string|null, project_id: string|null, media_asset_id: string|null, error: string|null}>}
+ */
+export async function getYoutubeDownloadStatus(jobId) {
+  const response = await apiClient.get(`/api/youtube-download/status/${jobId}`);
+  return response.data;
+}
+
+/**
+ * Start a YouTube download and resolve once it finishes (or rejects on error).
+ * @param {string} url - YouTube video URL
+ * @param {{ projectName?: string, onProgress?: (fraction: number) => void, intervalMs?: number }} [options]
+ * @returns {Promise<{file_id: string, project_id: string, media_asset_id: string}>}
+ */
+export async function importYouTubeVideo(
+  url,
+  { projectName, onProgress, intervalMs = 1500 } = {}
+) {
+  const { job_id } = await downloadYouTube(url, { projectName });
+
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        const status = await getYoutubeDownloadStatus(job_id);
+        if (onProgress && typeof status.progress === 'number') {
+          onProgress(status.progress);
+        }
+        if (status.status === 'done') {
+          resolve(status);
+        } else if (status.status === 'error') {
+          reject(new Error(status.error || 'YouTube download failed'));
+        } else {
+          setTimeout(poll, intervalMs);
+        }
+      } catch (err) {
+        reject(err);
+      }
+    };
+    poll();
+  });
+}
+
+/**
  * Detect NVIDIA GPUs available on the backend host (best-effort, via nvidia-smi).
  * @returns {Promise<{available: boolean, gpus: Array<{name: string, memory_total_mb: number|null}>, detail: string}>}
  */

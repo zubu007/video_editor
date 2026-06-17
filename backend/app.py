@@ -39,6 +39,11 @@ from backend.features.caption_removal.jobs import (
     run_caption_removal_job,
 )
 from backend.features.caption_removal.remove import DEFAULT_MODE, use_gpu_from_env
+from backend.features.youtube.jobs import (
+    create_job as create_download_job,
+    get_job as get_download_job,
+    run_download_job,
+)
 from backend.features.editing_plan.generator import generate_editing_plan
 from backend.features.filler_words.detect import detect_filler_words
 from backend.features.pexels.download import PexelsAPIError, download_stock_footage
@@ -405,6 +410,49 @@ class CaptionJobStatusResponse(BaseModel):
     status: str = Field(..., description="Job status (pending|running|done|error)")
     output_url: Optional[str] = Field(
         None, description="URL of the cleaned video when status is 'done'"
+    )
+    error: Optional[str] = Field(
+        None, description="Failure detail when status is 'error'"
+    )
+
+
+class YouTubeDownloadRequest(BaseModel):
+    """Request model for importing a video from YouTube."""
+
+    url: str = Field(..., description="YouTube video URL")
+    project_id: Optional[str] = Field(
+        None, description="Existing project to attach the imported video to"
+    )
+    project_name: Optional[str] = Field(
+        None, description="Name for a new project (defaults to the video title)"
+    )
+
+
+class YouTubeDownloadStartResponse(BaseModel):
+    """Response model for starting a YouTube download job."""
+
+    job_id: str = Field(..., description="Identifier for polling job status")
+    status: str = Field(..., description="Job status (pending|running|done|error)")
+
+
+class YouTubeDownloadStatusResponse(BaseModel):
+    """Response model for YouTube download job status.
+
+    Once ``status`` is ``done``, the ``file_id`` / ``project_id`` / ``media_asset_id``
+    fields mirror a direct upload so the client can continue the normal editing flow.
+    """
+
+    job_id: str
+    status: str = Field(..., description="Job status (pending|running|done|error)")
+    progress: float = Field(0.0, description="Download progress as a 0..1 fraction")
+    file_id: Optional[str] = Field(
+        None, description="Uploaded file ID when status is 'done'"
+    )
+    project_id: Optional[str] = Field(
+        None, description="Owning project ID when status is 'done'"
+    )
+    media_asset_id: Optional[str] = Field(
+        None, description="Stored media asset ID when status is 'done'"
     )
     error: Optional[str] = Field(
         None, description="Failure detail when status is 'error'"
@@ -1284,6 +1332,73 @@ async def get_caption_removal_status(job_id: str):
         job_id=job.job_id,
         status=job.status,
         output_url=output_url,
+        error=job.error,
+    )
+
+
+# ============================================================================
+# YouTube Import Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/api/video/download-youtube",
+    response_model=YouTubeDownloadStartResponse,
+)
+async def start_youtube_download(
+    request: YouTubeDownloadRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """Start a background job that imports a single video from YouTube.
+
+    The video is downloaded into ``temp/uploads/`` under a generated ``file_id`` and, on
+    completion, registered as a ``MediaAsset`` (creating a ``Project`` when none is given)
+    exactly like a direct upload. The job runs asynchronously; poll
+    ``/api/youtube-download/status/{job_id}`` for the result.
+
+    Playlists, livestreams, and over-long videos are rejected by the worker.
+    """
+    if not request.url.strip():
+        raise HTTPException(status_code=400, detail="No URL provided")
+
+    # Validate an existing project up front so the client gets immediate feedback.
+    if request.project_id and get_project(session, request.project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    file_id = str(uuid.uuid4())
+    job = create_download_job(request.url)
+    background_tasks.add_task(
+        run_download_job,
+        job.job_id,
+        request.url,
+        file_id,
+        str(UPLOAD_DIR),
+        project_id=request.project_id,
+        project_name=request.project_name,
+    )
+    logger.info("Started YouTube download job %s for %s", job.job_id, request.url)
+
+    return YouTubeDownloadStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get(
+    "/api/youtube-download/status/{job_id}",
+    response_model=YouTubeDownloadStatusResponse,
+)
+async def get_youtube_download_status(job_id: str):
+    """Return the status (and resulting IDs when done) of a YouTube download job."""
+    job = get_download_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="YouTube download job not found")
+
+    return YouTubeDownloadStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        file_id=job.file_id,
+        project_id=job.project_id,
+        media_asset_id=job.media_asset_id,
         error=job.error,
     )
 

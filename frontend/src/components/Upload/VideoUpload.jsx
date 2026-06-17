@@ -2,10 +2,13 @@ import React, { useState, useRef } from 'react';
 import { isVideoFile, formatFileSize, createBlobURL } from '../../utils/videoUtils';
 import styles from './VideoUpload.module.css';
 
-function VideoUpload({ onVideoSelect }) {
+function VideoUpload({ onVideoSelect, onYouTubeImport }) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState(null);
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
   const fileInputRef = useRef(null);
 
   const handleFile = (file) => {
@@ -70,6 +73,34 @@ function VideoUpload({ onVideoSelect }) {
     fileInputRef.current?.click();
   };
 
+  const handleYouTubeSubmit = async () => {
+    const url = youtubeUrl.trim();
+    if (!url) {
+      setError('Please paste a YouTube link');
+      return;
+    }
+    if (!onYouTubeImport) return;
+
+    setError(null);
+    setImporting(true);
+    setImportProgress(0);
+    try {
+      await onYouTubeImport(url, { onProgress: setImportProgress });
+      // On success the parent swaps to the editor view; nothing more to do here.
+    } catch (err) {
+      setError(err?.message || 'Failed to import this video');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleYouTubeKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleYouTubeSubmit();
+    }
+  };
+
   return (
     <div className={styles.uploadContainer}>
       <div
@@ -110,6 +141,38 @@ function VideoUpload({ onVideoSelect }) {
             <span className={styles.fileName}>{selectedFile.name}</span>
             <span className={styles.fileSize}>({formatFileSize(selectedFile.size)})</span>
           </div>
+        )}
+      </div>
+
+      <div className={styles.youtubeSection}>
+        <label htmlFor="youtube-url" className={styles.youtubeLabel}>
+          Or paste a YouTube video link to download and edit
+        </label>
+        <div className={styles.youtubeRow}>
+          <input
+            id="youtube-url"
+            type="url"
+            inputMode="url"
+            placeholder="https://www.youtube.com/watch?v=..."
+            value={youtubeUrl}
+            onChange={(e) => setYoutubeUrl(e.target.value)}
+            onKeyDown={handleYouTubeKeyDown}
+            disabled={importing}
+            className={styles.youtubeInput}
+          />
+          <button
+            type="button"
+            onClick={handleYouTubeSubmit}
+            disabled={importing || !youtubeUrl.trim()}
+            className={styles.youtubeButton}
+          >
+            {importing ? 'Importing…' : 'Import'}
+          </button>
+        </div>
+        {importing && (
+          <p className={styles.youtubeStatus}>
+            Downloading from YouTube… {Math.round(importProgress * 100)}%
+          </p>
         )}
       </div>
 

@@ -10,6 +10,7 @@ import SettingsModal from './components/Settings/SettingsModal';
 import useSettings from './hooks/useSettings';
 import {
   uploadVideo,
+  importYouTubeVideo,
   getVideoURL,
   getWaveformData,
   extractWords,
@@ -100,14 +101,8 @@ function App() {
     [editingPlan]
   );
 
-  const handleVideoSelect = async (file, blobUrl) => {
-    // Clean up previous blob URL
-    if (videoSrc && videoSrc.startsWith('blob:')) {
-      URL.revokeObjectURL(videoSrc);
-    }
-
-    setSelectedFile(file);
-    setVideoSrc(blobUrl);
+  // Reset all per-project derived state before loading a new source video.
+  const resetProjectStateForLoad = () => {
     setProjectId(null);
     setMediaAssetId(null);
     setWaveformData(null);
@@ -122,6 +117,40 @@ function App() {
     setPlanError(null);
     setToolError(null);
     setRenderResult(null);
+  };
+
+  // Given a backend response carrying file_id/project_id/media_asset_id (from either a
+  // direct upload or a YouTube import), point the player at the stored video and fetch
+  // waveform, transcript, and saved edits. Shared by both entry points.
+  const loadProjectMedia = async (response) => {
+    setFileId(response.file_id);
+    setProjectId(response.project_id);
+    setMediaAssetId(response.media_asset_id);
+    setVideoSrc(getVideoURL(response.file_id));
+
+    setIsLoadingWaveform(true);
+    setIsLoadingTranscript(true);
+
+    const [waveform, transcript] = await Promise.all([
+      getWaveformData(response.file_id, 2000),
+      extractWords(response.file_id, 'base'),
+    ]);
+
+    setWaveformData(waveform.waveform);
+    setTranscriptWords(transcript.words || []);
+    const edits = await getProjectEdits(response.project_id);
+    applyLoadedEdits(edits.edits);
+  };
+
+  const handleVideoSelect = async (file, blobUrl) => {
+    // Clean up previous blob URL
+    if (videoSrc && videoSrc.startsWith('blob:')) {
+      URL.revokeObjectURL(videoSrc);
+    }
+
+    setSelectedFile(file);
+    setVideoSrc(blobUrl);
+    resetProjectStateForLoad();
     setIsUploading(true);
     setUploadProgress(0);
 
@@ -133,35 +162,37 @@ function App() {
       });
 
       console.log('Video uploaded:', response);
-      setFileId(response.file_id);
-      setProjectId(response.project_id);
-      setMediaAssetId(response.media_asset_id);
       URL.revokeObjectURL(blobUrl);
-      setVideoSrc(getVideoURL(response.file_id));
-
-      // Fetch waveform data and transcript in parallel
-      console.log('Fetching waveform data and transcript...');
-      setIsLoadingWaveform(true);
-      setIsLoadingTranscript(true);
-      
-      const [waveform, transcript] = await Promise.all([
-        getWaveformData(response.file_id, 2000),
-        extractWords(response.file_id, 'base')
-      ]);
-      
-      console.log('Waveform data received:', waveform);
-      console.log('Transcript received:', transcript);
-      
-      setWaveformData(waveform.waveform);
-      setTranscriptWords(transcript.words || []);
-      const edits = await getProjectEdits(response.project_id);
-      applyLoadedEdits(edits.edits);
-
+      await loadProjectMedia(response);
     } catch (error) {
       console.error('Error uploading video or fetching data:', error);
       // Still allow playback with blob URL even if upload/waveform/transcript fails
     } finally {
       setIsUploading(false);
+      setIsLoadingWaveform(false);
+      setIsLoadingTranscript(false);
+    }
+  };
+
+  // Import a video straight from a YouTube URL. The backend downloads it and produces the
+  // same file_id/project_id/media_asset_id a direct upload would, so we reuse the pipeline.
+  // Rejects on failure so the upload component can surface an inline error.
+  const handleYouTubeImport = async (url, { onProgress } = {}) => {
+    if (videoSrc && videoSrc.startsWith('blob:')) {
+      URL.revokeObjectURL(videoSrc);
+    }
+
+    setSelectedFile({ name: 'YouTube video' });
+    setVideoSrc(null);
+    resetProjectStateForLoad();
+
+    try {
+      const response = await importYouTubeVideo(url, { onProgress });
+      await loadProjectMedia(response);
+    } catch (error) {
+      console.error('Error importing YouTube video:', error);
+      throw error;
+    } finally {
       setIsLoadingWaveform(false);
       setIsLoadingTranscript(false);
     }
@@ -525,7 +556,10 @@ function App() {
     <main className="app-main">
       {!videoSrc ? (
         <div className="upload-view">
-          <VideoUpload onVideoSelect={handleVideoSelect} />
+          <VideoUpload
+            onVideoSelect={handleVideoSelect}
+            onYouTubeImport={handleYouTubeImport}
+          />
         </div>
       ) : (
         <div className="workspace">
