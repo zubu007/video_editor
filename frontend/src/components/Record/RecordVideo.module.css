@@ -1,0 +1,226 @@
+.recordContainer {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.previewWrap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background-color: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.preview {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.mirrored {
+  transform: scaleX(-1);
+}
+
+.recBadge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background-color: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums;
+}
+
+.recDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #ef4444;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: #d1d5db;
+  font-size: 14px;
+}
+
+.devicesRow {
+  display: flex;
+  gap: 12px;
+}
+
+.deviceField {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.deviceField select {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.deviceField select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.deviceField select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+.recordButton,
+.stopButton,
+.useButton,
+.discardButton {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 28px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.recordButton {
+  background-color: #dc2626;
+  color: #fff;
+}
+
+.recordButton:hover:not(:disabled) {
+  background-color: #b91c1c;
+}
+
+.recordButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recordIcon {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: #fff;
+}
+
+.stopButton {
+  background-color: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.stopButton:hover {
+  border-color: #dc2626;
+  color: #dc2626;
+}
+
+.stopIcon {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background-color: currentColor;
+}
+
+.useButton {
+  background-color: var(--primary);
+  color: #fff;
+}
+
+.useButton:hover {
+  background-color: var(--primary-hover);
+}
+
+.discardButton {
+  background-color: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.discardButton:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.hint {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.error {
+  padding: 12px 16px;
+  background-color: #ffebee;
+  border-radius: 6px;
+  color: #c62828;
+  font-size: 14px;
+}
+
+@media (max-width: 640px) {
+  .devicesRow {
+    flex-direction: column;
+  }
+
+  .controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .recordButton,
+  .stopButton,
+  .useButton,
+  .discardButton {
+    justify-content: center;
+  }
+}

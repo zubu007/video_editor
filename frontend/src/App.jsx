@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import VideoPlayer from './components/VideoPlayer/VideoPlayer';
 import VideoUpload from './components/Upload/VideoUpload';
+import RecordVideo from './components/Record/RecordVideo';
 import TranscriptPanel from './components/TranscriptPanel/TranscriptPanel';
 import SilenceTool from './components/EditorTools/SilenceTool';
 import CaptionTool from './components/EditorTools/CaptionTool';
@@ -33,6 +34,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activePanel, setActivePanel] = useState('tools');
   const [currentView, setCurrentView] = useState('editor');
+  const [sourceMode, setSourceMode] = useState('choose'); // 'choose' | 'upload' | 'record'
   const [renderOptions, setRenderOptions] = useState({
     format: 'mp4',
     quality: 'high',
@@ -550,16 +552,61 @@ function App() {
     setToolError(null);
     setRenderResult(null);
     setCurrentView('editor');
+    setSourceMode('choose');
   };
 
   const renderEditor = () => (
     <main className="app-main">
       {!videoSrc ? (
         <div className="upload-view">
-          <VideoUpload
-            onVideoSelect={handleVideoSelect}
-            onYouTubeImport={handleYouTubeImport}
-          />
+          {sourceMode === 'choose' ? (
+            <div className="source-chooser">
+              <h2>Start a new project</h2>
+              <p>Bring in footage to edit — upload an existing file or record one now.</p>
+              <div className="source-options">
+                <button
+                  type="button"
+                  className="source-card"
+                  onClick={() => setSourceMode('upload')}
+                >
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z" />
+                  </svg>
+                  <strong>Upload footage</strong>
+                  <span>Use a video file from your computer or a YouTube link</span>
+                </button>
+                <button
+                  type="button"
+                  className="source-card"
+                  onClick={() => setSourceMode('record')}
+                >
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z" />
+                  </svg>
+                  <strong>Record new footage</strong>
+                  <span>Capture video with your camera and microphone</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="source-panel">
+              <button
+                type="button"
+                className="text-button source-back"
+                onClick={() => setSourceMode('choose')}
+              >
+                ← Back
+              </button>
+              {sourceMode === 'upload' ? (
+                <VideoUpload
+                  onVideoSelect={handleVideoSelect}
+                  onYouTubeImport={handleYouTubeImport}
+                />
+              ) : (
+                <RecordVideo onVideoSelect={handleVideoSelect} />
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="workspace">

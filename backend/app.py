@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiofiles
+import imageio_ffmpeg
 from dotenv import load_dotenv
 from fastapi import (
     BackgroundTasks,
@@ -564,6 +566,41 @@ def get_video_duration(video_path: Path) -> float | None:
             video.close()
 
 
+def remux_video_in_place(video_path: Path) -> bool:
+    """Rewrite the media container in place to restore missing metadata.
+
+    Browser ``MediaRecorder`` output (notably Chrome's WebM) lacks duration
+    and seek cues in its container header, which breaks duration probing and
+    player seeking. A stream-copy remux through ffmpeg rewrites the container
+    with correct metadata without re-encoding.
+
+    Returns:
+        True if the file was rewritten, False if the remux failed (the
+        original file is left untouched).
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    remuxed_path = video_path.with_name(f"{video_path.stem}.remux{video_path.suffix}")
+    command = [ffmpeg, "-y", "-i", str(video_path), "-c", "copy", str(remuxed_path)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Remux failed for %s: %s", video_path, e)
+        remuxed_path.unlink(missing_ok=True)
+        return False
+
+    if result.returncode != 0 or not remuxed_path.exists():
+        logger.warning(
+            "Remux failed for %s: %s",
+            video_path,
+            (result.stderr or "")[-500:],
+        )
+        remuxed_path.unlink(missing_ok=True)
+        return False
+
+    remuxed_path.replace(video_path)
+    return True
+
+
 def file_response_for_video(
     video_path: Path, filename: str | None = None
 ) -> FileResponse:
@@ -640,9 +677,17 @@ async def upload_video(
         logger.info(f"Uploading video: {video.filename} as {stored_filename}")
         await save_upload_file(video, video_path)
 
-        # Get file size
-        file_size = video_path.stat().st_size
         duration = get_video_duration(video_path)
+        if duration is None:
+            # Typical for in-browser recordings (MediaRecorder): the container
+            # has no duration/seek metadata until it is remuxed.
+            logger.info(
+                "No duration metadata for %s; remuxing container", stored_filename
+            )
+            if remux_video_in_place(video_path):
+                duration = get_video_duration(video_path)
+
+        file_size = video_path.stat().st_size
         file_url = f"/api/video/{file_id}"
 
         if project_id:
