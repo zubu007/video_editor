@@ -46,6 +46,7 @@ from backend.features.youtube.jobs import (
     get_job as get_download_job,
     run_download_job,
 )
+from backend.features.diagram.detector import suggest_diagrams
 from backend.features.editing_plan.generator import generate_editing_plan
 from backend.features.filler_words.detect import detect_filler_words
 from backend.features.pexels.download import PexelsAPIError, download_stock_footage
@@ -208,6 +209,53 @@ class EditingPlanResponse(BaseModel):
     """Response model for editing plan generation."""
 
     editing_plan: list[EditingDecision] = []
+
+
+class DiagramNode(BaseModel):
+    """Model for one node of a diagram graph spec."""
+
+    id: str = Field(..., description="Unique node id within the graph")
+    label: str = Field(..., description="Short on-screen label")
+
+
+class DiagramEdge(BaseModel):
+    """Model for one edge of a diagram graph spec."""
+
+    source: str = Field(..., description="Id of the source node")
+    target: str = Field(..., description="Id of the target node")
+    label: Optional[str] = Field(None, description="Optional edge label")
+
+
+class DiagramGraph(BaseModel):
+    """Model for a validated diagram graph spec."""
+
+    nodes: list[DiagramNode] = []
+    edges: list[DiagramEdge] = []
+    reveal_order: list[str] = Field(
+        default_factory=list, description="Node ids in animation reveal order"
+    )
+
+
+class DiagramSuggestion(BaseModel):
+    """Model for one suggested diagram overlay."""
+
+    start: float = Field(..., description="Start time in seconds")
+    end: float = Field(..., description="End time in seconds")
+    diagram_type: str = Field(
+        ..., description="One of: flowchart, timeline, comparison, cycle"
+    )
+    title: str = Field("", description="Short on-screen title")
+    transcript_excerpt: str = Field(
+        "", description="Transcript text the diagram illustrates"
+    )
+    reason: str = Field("", description="Why this segment benefits from a diagram")
+    graph: DiagramGraph
+
+
+class DiagramSuggestResponse(BaseModel):
+    """Response model for diagram suggestion."""
+
+    diagrams: list[DiagramSuggestion] = []
 
 
 class StockFootageResponse(BaseModel):
@@ -537,6 +585,19 @@ class GpuDetectionResponse(BaseModel):
 
 class EditingPlanRequest(BaseModel):
     """Request model for file-id based editing plan generation."""
+
+    model_size: str = Field("base", description="Whisper model size")
+    api_key: Optional[str] = Field(None, description="Groq API key")
+    llm_model: str = Field(
+        "llama-3.3-70b-versatile", description="Groq LLM model to use"
+    )
+    additional_context: str = Field(
+        "", description="Additional context or instructions"
+    )
+
+
+class DiagramSuggestRequest(BaseModel):
+    """Request model for file-id based diagram suggestion."""
 
     model_size: str = Field("base", description="Whisper model size")
     api_key: Optional[str] = Field(None, description="Groq API key")
@@ -1109,9 +1170,7 @@ async def render_project(
     ).all()
 
     cut_ranges = [
-        {"start": edit.start, "end": edit.end}
-        for edit in edits
-        if edit.type == "cut"
+        {"start": edit.start, "end": edit.end} for edit in edits if edit.type == "cut"
     ]
     zoom_ranges = [
         {
@@ -1508,9 +1567,7 @@ async def get_caption_removal_status(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Caption removal job not found")
 
-    output_url = (
-        f"/api/renders/{job.output_filename}" if job.status == "done" else None
-    )
+    output_url = f"/api/renders/{job.output_filename}" if job.status == "done" else None
     return CaptionJobStatusResponse(
         job_id=job.job_id,
         status=job.status,
@@ -1945,7 +2002,8 @@ async def generate_editing_plan_endpoint(
         "base", description="Whisper model size (tiny, base, small, medium, large)"
     ),
     api_key: Optional[str] = Form(
-        None, description="Groq API key (optional, uses API_KEY env var if not provided)"
+        None,
+        description="Groq API key (optional, uses API_KEY env var if not provided)",
     ),
     llm_model: str = Form(
         "llama-3.3-70b-versatile",
@@ -2047,6 +2105,49 @@ async def generate_editing_plan_by_id(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error generating editing plan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Diagram Suggestion Endpoints
+# ============================================================================
+
+
+@app.post("/api/diagrams/suggest/{file_id}", response_model=DiagramSuggestResponse)
+async def suggest_diagrams_by_id(
+    file_id: str,
+    request: DiagramSuggestRequest,
+):
+    """Suggest animated diagram overlays for a previously uploaded video.
+
+    Analyzes the sentence-level transcript and returns segments where the
+    speaker describes a process, timeline, comparison, or cycle, each with a
+    validated graph spec (nodes, edges, reveal order) ready for rendering.
+    """
+    try:
+        video_path = find_uploaded_video(file_id)
+        logger.info(f"Extracting transcript sentences from {video_path.name}")
+        transcript = extract_transcript_as_sentences(
+            str(video_path), request.model_size
+        )
+
+        logger.info("Suggesting diagram overlays")
+        diagrams = suggest_diagrams(
+            transcript=transcript,
+            api_key=request.api_key,
+            model=request.llm_model,
+            additional_context=request.additional_context,
+        )
+
+        return DiagramSuggestResponse(diagrams=diagrams)
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Invalid diagram suggestion request: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error suggesting diagrams: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
