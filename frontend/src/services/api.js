@@ -265,6 +265,32 @@ export async function renderProject(projectId) {
 }
 
 /**
+ * Fetch a project's ordered timeline segments
+ * @param {string} projectId - Project ID
+ * @returns {Promise<{segments: Array<{id: string, start: number, end: number, position: number}>}>}
+ */
+export async function getProjectTimeline(projectId) {
+  const response = await apiClient.get(`/api/projects/${projectId}/timeline`);
+  return response.data;
+}
+
+/**
+ * Replace a project's ordered timeline segments.
+ * The array order is the playback order; an empty array clears the timeline.
+ * @param {string} projectId - Project ID
+ * @param {Array<{start: number, end: number}>} segments - Ordered source ranges
+ * @param {string|null} mediaAssetId - Media asset the segments reference
+ * @returns {Promise<{segments: Array<{id: string, start: number, end: number, position: number}>}>}
+ */
+export async function saveProjectTimeline(projectId, segments, mediaAssetId = null) {
+  const response = await apiClient.put(`/api/projects/${projectId}/timeline`, {
+    segments: segments.map(({ start, end }) => ({ start, end })),
+    media_asset_id: mediaAssetId,
+  });
+  return response.data;
+}
+
+/**
  * Start a background job that removes burned-in captions from a video.
  * @param {string} fileId - Uploaded file ID
  * @param {{ mode?: string, useGpu?: boolean }} [options] - Inpainting mode and GPU toggle.

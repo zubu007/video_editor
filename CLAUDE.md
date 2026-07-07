@@ -133,10 +133,15 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
 ### Persistence ([backend/storage/database.py](backend/storage/database.py))
 
 SQLModel over SQLite at `data/video_editor.db` (created on startup via `init_db()` in the app
-lifespan). Three tables: `Project`, `MediaAsset` (one source file, keyed by `file_id`), and
-`EditOperation` (non-destructive cut, with `enabled` flag and a JSON `details` column). Routes get
-a session via the `get_session` FastAPI dependency. Only `type="cut"` edits are currently
-supported by the edit endpoints and render.
+lifespan). Core tables: `Project`, `MediaAsset` (one source file, keyed by `file_id`), and
+`EditOperation` (non-destructive edit, with `enabled` flag and a JSON `details` column). Routes get
+a session via the `get_session` FastAPI dependency. The generic edit endpoints accept the types in
+`SUPPORTED_EDIT_TYPES` (`cut`, `zoom`, `insert_stock_footage`). Timeline segments — the ordered,
+possibly rearranged source ranges built in the frontend's `Timeline` component — are stored as
+`EditOperation` rows of `type="timeline_segment"` (order in `details["position"]`) and are managed
+only via `GET/PUT /api/projects/{id}/timeline`. When a project has a saved timeline, render uses
+`render_timeline()` (segments in saved order, cuts subtracted and zoom/stock applied within them);
+otherwise it falls back to `render_with_edits()` on the original timeline.
 
 ### Filesystem conventions
 

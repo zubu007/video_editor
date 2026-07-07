@@ -62,7 +62,11 @@ from backend.features.project_io import (
     load_project_file,
 )
 from backend.features.project_io.import_ import ProjectFileError
-from backend.features.video_cutter.cut import cut_filler_words, render_with_edits
+from backend.features.video_cutter.cut import (
+    cut_filler_words,
+    render_timeline,
+    render_with_edits,
+)
 from backend.storage.database import (
     EditingPlan,
     EditOperation,
@@ -126,6 +130,11 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 # Edit operation types that can be persisted and rendered for a project.
 SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage"}
+
+# Timeline segments are stored as EditOperation rows of this type, ordered by
+# details["position"]. They are managed only through the /timeline endpoints,
+# not the generic edit endpoints.
+TIMELINE_EDIT_TYPE = "timeline_segment"
 DEFAULT_ZOOM_LEVEL = 1.2
 CONTENT_TYPE_BY_EXTENSION = {
     ".mp4": "video/mp4",
@@ -289,6 +298,38 @@ class EditOperationsResponse(BaseModel):
     """Response model for stored edit operations."""
 
     edits: list[EditOperationResponse] = Field(default_factory=list)
+
+
+class TimelineSegmentInput(BaseModel):
+    """One ordered timeline segment (a source-time range) being saved."""
+
+    start: float = Field(..., ge=0, description="Source start time in seconds")
+    end: float = Field(..., gt=0, description="Source end time in seconds")
+
+
+class TimelineUpdateRequest(BaseModel):
+    """Request model replacing a project's ordered timeline segments."""
+
+    segments: list[TimelineSegmentInput] = Field(
+        default_factory=list,
+        description="Ordered segments; an empty list clears the timeline",
+    )
+    media_asset_id: Optional[str] = None
+
+
+class TimelineSegmentResponse(BaseModel):
+    """Response model for one stored timeline segment."""
+
+    id: str
+    start: float
+    end: float
+    position: int
+
+
+class TimelineResponse(BaseModel):
+    """Response model for a project's ordered timeline."""
+
+    segments: list[TimelineSegmentResponse] = Field(default_factory=list)
 
 
 class AudioPauseRange(BaseModel):
@@ -960,6 +1001,83 @@ async def delete_project_edit(
     return {"status": "deleted"}
 
 
+def _timeline_segment_rows(session: Session, project_id: str) -> list[EditOperation]:
+    """Return a project's timeline segments ordered by their saved position."""
+    rows = session.exec(
+        select(EditOperation).where(
+            EditOperation.project_id == project_id,
+            EditOperation.type == TIMELINE_EDIT_TYPE,
+        )
+    ).all()
+    return sorted(rows, key=lambda row: (row.details or {}).get("position", 0))
+
+
+def _timeline_response(rows: list[EditOperation]) -> TimelineResponse:
+    """Convert ordered timeline segment rows into the API response shape."""
+    return TimelineResponse(
+        segments=[
+            TimelineSegmentResponse(
+                id=row.id,
+                start=row.start,
+                end=row.end,
+                position=(row.details or {}).get("position", index),
+            )
+            for index, row in enumerate(rows)
+        ]
+    )
+
+
+@app.get("/api/projects/{project_id}/timeline", response_model=TimelineResponse)
+async def get_project_timeline(
+    project_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get a project's ordered timeline segments (empty if none saved)."""
+    ensure_project(session, project_id)
+    return _timeline_response(_timeline_segment_rows(session, project_id))
+
+
+@app.put("/api/projects/{project_id}/timeline", response_model=TimelineResponse)
+async def save_project_timeline(
+    project_id: str,
+    request: TimelineUpdateRequest,
+    session: Session = Depends(get_session),
+):
+    """Replace a project's ordered timeline segments.
+
+    The request's segment order is the playback order. Saving an empty list
+    clears the timeline, restoring the default cut-based render.
+    """
+    project = ensure_project(session, project_id)
+    for segment in request.segments:
+        validate_cut_range(segment.start, segment.end)
+
+    for row in _timeline_segment_rows(session, project_id):
+        session.delete(row)
+
+    created: list[EditOperation] = []
+    for position, segment in enumerate(request.segments):
+        row = EditOperation(
+            project_id=project_id,
+            media_asset_id=request.media_asset_id,
+            type=TIMELINE_EDIT_TYPE,
+            source="timeline",
+            start=segment.start,
+            end=segment.end,
+            enabled=True,
+            details={"position": position},
+        )
+        session.add(row)
+        created.append(row)
+
+    touch_project(session, project)
+    session.commit()
+    for row in created:
+        session.refresh(row)
+
+    return _timeline_response(created)
+
+
 @app.post("/api/projects/{project_id}/render", response_model=RenderResponse)
 async def render_project(
     project_id: str,
@@ -1044,17 +1162,34 @@ async def render_project(
             }
         )
 
+    # A saved timeline (ordered, possibly rearranged segments) takes over as
+    # the render's structure; cuts/zoom/stock still apply within its segments.
+    timeline_rows = sorted(
+        (edit for edit in edits if edit.type == TIMELINE_EDIT_TYPE),
+        key=lambda row: (row.details or {}).get("position", 0),
+    )
+
     output_filename = f"rendered_{project_id}_{uuid.uuid4().hex[:8]}{video_path.suffix}"
     output_path = OUTPUT_DIR / output_filename
 
     try:
-        render_with_edits(
-            str(video_path),
-            cut_ranges,
-            zoom_ranges,
-            str(output_path),
-            stock_footage_ranges,
-        )
+        if timeline_rows:
+            render_timeline(
+                str(video_path),
+                [{"start": row.start, "end": row.end} for row in timeline_rows],
+                str(output_path),
+                cut_ranges,
+                zoom_ranges,
+                stock_footage_ranges,
+            )
+        else:
+            render_with_edits(
+                str(video_path),
+                cut_ranges,
+                zoom_ranges,
+                str(output_path),
+                stock_footage_ranges,
+            )
     except Exception as e:
         logger.error(f"Error rendering project: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1062,7 +1197,10 @@ async def render_project(
     return RenderResponse(
         output_url=f"/api/renders/{output_filename}",
         filename=output_filename,
-        applied_edits=len(cut_ranges) + len(zoom_ranges) + len(stock_footage_ranges),
+        applied_edits=len(cut_ranges)
+        + len(zoom_ranges)
+        + len(stock_footage_ranges)
+        + len(timeline_rows),
     )
 
 

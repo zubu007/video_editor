@@ -137,21 +137,29 @@ def _focus_for_span(video: VideoFileClip, start: float, end: float):
         return None
 
 
-def _kept_intervals(
-    cut_ranges: list, duration: float
+def _interval_minus_cuts(
+    start: float, end: float, cut_ranges: list
 ) -> list[tuple[float, float]]:
-    """Return the intervals of the source kept after removing ``cut_ranges``."""
+    """Return the sub-intervals of ``[start, end)`` kept after removing cuts."""
     intervals: list[tuple[float, float]] = []
-    last_end = 0.0
+    last_end = start
     for cut in sorted(cut_ranges, key=lambda r: r["start"]):
-        start = cut["start"]
-        if start > last_end:
-            intervals.append((last_end, start))
-        last_end = max(last_end, cut["end"])
+        cut_start = max(cut["start"], start)
+        cut_end = min(cut["end"], end)
+        if cut_end <= cut_start:
+            continue
+        if cut_start > last_end:
+            intervals.append((last_end, cut_start))
+        last_end = max(last_end, cut_end)
 
-    if last_end < duration:
-        intervals.append((last_end, duration))
+    if last_end < end:
+        intervals.append((last_end, end))
     return intervals
+
+
+def _kept_intervals(cut_ranges: list, duration: float) -> list[tuple[float, float]]:
+    """Return the intervals of the source kept after removing ``cut_ranges``."""
+    return _interval_minus_cuts(0.0, duration, cut_ranges)
 
 
 def _active_range(point: float, ranges: list) -> dict | None:
@@ -228,25 +236,95 @@ def render_with_edits(
 
     clips_to_keep = []
     for interval_start, interval_end in _kept_intervals(cut_ranges, video.duration):
-        for span_start, span_end, level, footage_path in _segment_spans(
-            interval_start, interval_end, sorted_zooms, sorted_stock
-        ):
-            clip = _subclip(video, span_start, span_end)
-            if footage_path:
-                clip = _apply_stock_overlay(clip, footage_path)
-            elif level and level != 1.0:
-                focus = _focus_for_span(video, span_start, span_end)
-                clip = _apply_zoom(clip, level, focus)
-            clips_to_keep.append(clip)
+        clips_to_keep.extend(
+            _effect_clips(
+                video, interval_start, interval_end, sorted_zooms, sorted_stock
+            )
+        )
 
-    if clips_to_keep:
-        final_clip = concatenate_videoclips(clips_to_keep)
+    _write_concatenated(video, clips_to_keep, output_path)
+
+
+def _effect_clips(
+    video: VideoFileClip,
+    interval_start: float,
+    interval_end: float,
+    zoom_ranges: list,
+    stock_ranges: list,
+) -> list:
+    """Build the effect-applied subclips covering one kept interval."""
+    clips = []
+    for span_start, span_end, level, footage_path in _segment_spans(
+        interval_start, interval_end, zoom_ranges, stock_ranges
+    ):
+        clip = _subclip(video, span_start, span_end)
+        if footage_path:
+            clip = _apply_stock_overlay(clip, footage_path)
+        elif level and level != 1.0:
+            focus = _focus_for_span(video, span_start, span_end)
+            clip = _apply_zoom(clip, level, focus)
+        clips.append(clip)
+    return clips
+
+
+def _write_concatenated(video: VideoFileClip, clips: list, output_path: str) -> None:
+    """Concatenate ``clips`` and write the result (empty video when none)."""
+    if clips:
+        final_clip = concatenate_videoclips(clips)
         final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
     else:
         # If everything was cut, write an empty video.
         _subclip(video, 0, 0).write_videofile(
             output_path, codec="libx264", audio_codec="aac"
         )
+
+
+def render_timeline(
+    video_path: str,
+    segments: list,
+    output_path: str,
+    cut_ranges: list | None = None,
+    zoom_ranges: list | None = None,
+    stock_footage_ranges: list | None = None,
+) -> None:
+    """Render ordered timeline segments, composing source-time edits.
+
+    ``segments`` is an *ordered* list of ``{"start", "end"}`` source ranges; the
+    output plays them in list order, which may differ from source order (segments
+    can be rearranged, and gaps between them are omitted). Cut ranges are
+    subtracted from every segment they intersect, and zoom / stock-footage
+    effects are applied to the spans they cover — all expressed on the original
+    video's timeline, with the same semantics as :func:`render_with_edits`.
+
+    Args:
+        video_path (str): Path to the source video file.
+        segments (list): Ordered source ranges to play, each ``{"start", "end"}``.
+        output_path (str): Path to write the rendered video to.
+        cut_ranges (list | None): Time ranges to remove, each ``{"start", "end"}``.
+        zoom_ranges (list | None): Zoom ranges, each ``{"start", "end", "level"}``.
+        stock_footage_ranges (list | None): B-roll overlays, each
+            ``{"start", "end", "footage_path"}``.
+    """
+    video = VideoFileClip(video_path)
+    duration = float(video.duration)
+    cuts = sorted(cut_ranges or [], key=lambda r: r["start"])
+    zooms = sorted(zoom_ranges or [], key=lambda r: r["start"])
+    stock = sorted(stock_footage_ranges or [], key=lambda r: r["start"])
+
+    clips = []
+    for segment in segments:
+        segment_start = max(0.0, float(segment["start"]))
+        segment_end = min(duration, float(segment["end"]))
+        if segment_end <= segment_start:
+            continue
+        for interval_start, interval_end in _interval_minus_cuts(
+            segment_start, segment_end, cuts
+        ):
+            clips.extend(
+                _effect_clips(video, interval_start, interval_end, zooms, stock)
+            )
+
+    _write_concatenated(video, clips, output_path)
 
 
 def cut_filler_words(

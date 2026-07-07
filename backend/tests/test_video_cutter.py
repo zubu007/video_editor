@@ -3,8 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.features.video_cutter.cut import cut_filler_words, render_with_edits
-from moviepy import VideoFileClip
+from backend.features.video_cutter.cut import (
+    cut_filler_words,
+    render_timeline,
+    render_with_edits,
+)
+from moviepy import VideoFileClip, concatenate_videoclips
 
 
 class TestVideoCutter(unittest.TestCase):
@@ -132,6 +136,46 @@ class TestVideoCutter(unittest.TestCase):
         # Outside the overlay the source stays black.
         source = rendered.get_frame(1.0)
         self.assertLess(int(source.mean()), 40)
+
+    def test_render_timeline_reorders_segments(self):
+        red = Path(self.temp_dir.name) / "red.mp4"
+        blue = Path(self.temp_dir.name) / "blue.mp4"
+        self._make_clip(red, "red", 3)
+        self._make_clip(blue, "blue", 3)
+        source = Path(self.temp_dir.name) / "two_color.mp4"
+        concatenate_videoclips(
+            [VideoFileClip(str(red)), VideoFileClip(str(blue))]
+        ).write_videofile(str(source), codec="libx264")
+
+        # Play the blue half (3-6s) before the red half (0-3s).
+        render_timeline(
+            str(source),
+            [{"start": 3, "end": 6}, {"start": 0, "end": 3}],
+            str(self.output_path),
+        )
+
+        self.assertTrue(self.output_path.exists())
+        rendered = VideoFileClip(str(self.output_path))
+        self.assertAlmostEqual(rendered.duration, 6, delta=0.5)
+        first = rendered.get_frame(1.0)
+        self.assertGreater(int(first[..., 2].mean()), 100)
+        self.assertLess(int(first[..., 0].mean()), 80)
+        second = rendered.get_frame(4.5)
+        self.assertGreater(int(second[..., 0].mean()), 100)
+        self.assertLess(int(second[..., 2].mean()), 80)
+
+    def test_render_timeline_subtracts_cuts_within_segments(self):
+        # Reordered halves of the 10s source, with one cut in each half.
+        render_timeline(
+            str(self.video_path),
+            [{"start": 5, "end": 10}, {"start": 0, "end": 5}],
+            str(self.output_path),
+            cut_ranges=[{"start": 1, "end": 2}, {"start": 6, "end": 7}],
+        )
+
+        self.assertTrue(self.output_path.exists())
+        edited_duration = VideoFileClip(str(self.output_path)).duration
+        self.assertAlmostEqual(edited_duration, 8, delta=0.5)
 
     def tearDown(self):
         self.temp_dir.cleanup()

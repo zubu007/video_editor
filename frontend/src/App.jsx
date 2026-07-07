@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import VideoPlayer from './components/VideoPlayer/VideoPlayer';
 import VideoUpload from './components/Upload/VideoUpload';
 import RecordVideo from './components/Record/RecordVideo';
 import TranscriptPanel from './components/TranscriptPanel/TranscriptPanel';
+import Timeline from './components/Timeline/Timeline';
 import SilenceTool from './components/EditorTools/SilenceTool';
 import CaptionTool from './components/EditorTools/CaptionTool';
 import EditingPlanPanel from './components/EditorTools/EditingPlanPanel';
@@ -21,6 +22,8 @@ import {
   updateProjectEdit,
   deleteProjectEdit,
   renderProject,
+  getProjectTimeline,
+  saveProjectTimeline,
   generateEditingPlan,
   downloadStockFootage,
   getStockFootageURL,
@@ -46,6 +49,11 @@ function App() {
   const [projectId, setProjectId] = useState(null);
   const [mediaAssetId, setMediaAssetId] = useState(null);
   const [waveformData, setWaveformData] = useState(null);
+  const [sourceDuration, setSourceDuration] = useState(null);
+  const [timelineSegments, setTimelineSegments] = useState([]);
+  const [timelineDirty, setTimelineDirty] = useState(false);
+  const [hasSavedTimeline, setHasSavedTimeline] = useState(false);
+  const [isSavingTimeline, setIsSavingTimeline] = useState(false);
   const [transcriptWords, setTranscriptWords] = useState([]);
   const [detectedPauses, setDetectedPauses] = useState([]);
   const [editOperations, setEditOperations] = useState([]);
@@ -68,6 +76,17 @@ function App() {
   const [isConfirmingCuts, setIsConfirmingCuts] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const videoPlayerRef = useRef(null);
+
+  // Timeline preview playback reads segments via a ref so the media-element
+  // event handlers never act on a stale segment list.
+  const timelineRef = useRef([]);
+  const activeSegmentIndexRef = useRef(0);
+  useEffect(() => {
+    timelineRef.current = timelineSegments;
+    if (activeSegmentIndexRef.current >= timelineSegments.length) {
+      activeSegmentIndexRef.current = 0;
+    }
+  }, [timelineSegments]);
 
   const rangeMarkers = useMemo(() => {
     const proposalMarkers = detectedPauses.map((pause) => ({
@@ -108,6 +127,11 @@ function App() {
     setProjectId(null);
     setMediaAssetId(null);
     setWaveformData(null);
+    setSourceDuration(null);
+    setTimelineSegments([]);
+    setTimelineDirty(false);
+    setHasSavedTimeline(false);
+    activeSegmentIndexRef.current = 0;
     setTranscriptWords([]);
     setDetectedPauses([]);
     setEditOperations([]);
@@ -139,9 +163,27 @@ function App() {
     ]);
 
     setWaveformData(waveform.waveform);
+    setSourceDuration(waveform.duration);
     setTranscriptWords(transcript.words || []);
     const edits = await getProjectEdits(response.project_id);
     applyLoadedEdits(edits.edits);
+
+    // Restore a saved timeline arrangement, or start from the full source as
+    // a single segment.
+    const timeline = await getProjectTimeline(response.project_id);
+    if (timeline.segments.length > 0) {
+      setTimelineSegments(
+        timeline.segments.map(({ id, start, end }) => ({ id, start, end }))
+      );
+      setHasSavedTimeline(true);
+    } else {
+      setTimelineSegments([
+        { id: crypto.randomUUID(), start: 0, end: waveform.duration },
+      ]);
+      setHasSavedTimeline(false);
+    }
+    setTimelineDirty(false);
+    activeSegmentIndexRef.current = 0;
   };
 
   const handleVideoSelect = async (file, blobUrl) => {
@@ -200,8 +242,125 @@ function App() {
     }
   };
 
-  const handleTimeUpdate = (currentTime) => {
-    setCurrentTime(currentTime);
+  const handleTimeUpdate = (time) => {
+    setCurrentTime(time);
+
+    // Sequential timeline preview: when playback reaches the end of the
+    // active segment, jump to the next segment in timeline order (which may
+    // be anywhere in the source), pausing after the last one.
+    const segments = timelineRef.current;
+    if (segments.length === 0) return;
+
+    const EPSILON = 0.08;
+    let index = activeSegmentIndexRef.current;
+    if (index >= segments.length) index = 0;
+    const segment = segments[index];
+
+    if (time >= segment.start - EPSILON && time < segment.end - EPSILON) {
+      return;
+    }
+
+    if (time >= segment.end - EPSILON && time < segment.end + 0.5) {
+      if (index + 1 < segments.length) {
+        activeSegmentIndexRef.current = index + 1;
+        videoPlayerRef.current?.seek(segments[index + 1].start);
+      } else {
+        videoPlayerRef.current?.pause();
+      }
+      return;
+    }
+
+    // The user seeked elsewhere: re-sync to the segment containing that time.
+    const containing = segments.findIndex(
+      (candidate) => time >= candidate.start && time < candidate.end
+    );
+    if (containing !== -1) {
+      activeSegmentIndexRef.current = containing;
+    }
+  };
+
+  const MIN_SEGMENT_LENGTH = 0.1;
+
+  const handleSplitAtPlayhead = () => {
+    const time = currentTime;
+    const index = timelineSegments.findIndex(
+      (segment) =>
+        time > segment.start + MIN_SEGMENT_LENGTH &&
+        time < segment.end - MIN_SEGMENT_LENGTH
+    );
+    if (index === -1) return;
+
+    const segment = timelineSegments[index];
+    const next = [...timelineSegments];
+    next.splice(
+      index,
+      1,
+      { ...segment, id: crypto.randomUUID(), end: time },
+      { ...segment, id: crypto.randomUUID(), start: time }
+    );
+    setTimelineSegments(next);
+    setTimelineDirty(true);
+  };
+
+  const handleReorderSegments = (fromIndex, insertIndex) => {
+    if (fromIndex === insertIndex || fromIndex + 1 === insertIndex) return;
+    const next = [...timelineSegments];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(insertIndex > fromIndex ? insertIndex - 1 : insertIndex, 0, moved);
+    setTimelineSegments(next);
+    setTimelineDirty(true);
+  };
+
+  const handleDeleteSegment = (segmentId) => {
+    if (timelineSegments.length <= 1) return;
+    setTimelineSegments(
+      timelineSegments.filter((segment) => segment.id !== segmentId)
+    );
+    setTimelineDirty(true);
+  };
+
+  const handleResetTimeline = () => {
+    if (!sourceDuration) return;
+    setTimelineSegments([
+      { id: crypto.randomUUID(), start: 0, end: sourceDuration },
+    ]);
+    setTimelineDirty(true);
+  };
+
+  const handleSaveTimeline = async () => {
+    if (!projectId) return;
+
+    setIsSavingTimeline(true);
+    setToolError(null);
+    try {
+      // A single untouched full-length segment means "no custom timeline";
+      // save an empty list so render falls back to the plain cut flow.
+      const isTrivial =
+        timelineSegments.length === 1 &&
+        timelineSegments[0].start === 0 &&
+        sourceDuration !== null &&
+        Math.abs(timelineSegments[0].end - sourceDuration) < 0.01;
+
+      const result = await saveProjectTimeline(
+        projectId,
+        isTrivial ? [] : timelineSegments,
+        mediaAssetId
+      );
+      if (result.segments.length > 0) {
+        setTimelineSegments(
+          result.segments.map(({ id, start, end }) => ({ id, start, end }))
+        );
+        setHasSavedTimeline(true);
+      } else {
+        setHasSavedTimeline(false);
+      }
+      setTimelineDirty(false);
+    } catch (error) {
+      console.error('Error saving timeline:', error);
+      setToolError('Could not save the timeline.');
+    } finally {
+      setIsSavingTimeline(false);
+    }
   };
 
   const handleVideoEnded = () => {
@@ -540,6 +699,11 @@ function App() {
     setProjectId(null);
     setMediaAssetId(null);
     setWaveformData(null);
+    setSourceDuration(null);
+    setTimelineSegments([]);
+    setTimelineDirty(false);
+    setHasSavedTimeline(false);
+    activeSegmentIndexRef.current = 0;
     setTranscriptWords([]);
     setDetectedPauses([]);
     setEditOperations([]);
@@ -618,6 +782,21 @@ function App() {
               onEnded={handleVideoEnded}
               waveformData={waveformData}
               rangeMarkers={rangeMarkers}
+            />
+
+            <Timeline
+              segments={timelineSegments}
+              duration={sourceDuration || 0}
+              waveformData={waveformData}
+              currentTime={currentTime}
+              isDirty={timelineDirty}
+              isSaving={isSavingTimeline}
+              onSeek={handleSeek}
+              onSplitAtPlayhead={handleSplitAtPlayhead}
+              onReorder={handleReorderSegments}
+              onDeleteSegment={handleDeleteSegment}
+              onReset={handleResetTimeline}
+              onSave={handleSaveTimeline}
             />
 
             <div className="status-strip">
@@ -793,6 +972,9 @@ function App() {
           <span>{editOperations.filter((edit) => edit.enabled !== false).length} active cuts</span>
           <span>{savedZoomEdits.filter((edit) => edit.enabled !== false).length} zoom effects</span>
           <span>{savedStockEdits.filter((edit) => edit.enabled !== false).length} stock clips</span>
+          {hasSavedTimeline && (
+            <span>custom timeline ({timelineSegments.length} segments)</span>
+          )}
           <span>{selectedFile?.name || 'No video selected'}</span>
         </div>
 
@@ -805,7 +987,8 @@ function App() {
             !projectId ||
             (editOperations.length === 0 &&
               savedZoomEdits.length === 0 &&
-              savedStockEdits.length === 0)
+              savedStockEdits.length === 0 &&
+              !hasSavedTimeline)
           }
         >
           {isRendering ? 'Rendering...' : 'Render Video'}
