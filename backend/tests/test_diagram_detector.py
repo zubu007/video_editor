@@ -140,6 +140,23 @@ class TestValidateGraph(unittest.TestCase):
 
         self.assertEqual(graph["reveal_order"], ["a", "b", "c"])
 
+    def test_reveal_at_kept_and_invalid_dropped(self):
+        graph = validate_graph(
+            make_graph(
+                nodes=[
+                    {"id": "a", "label": "Timed", "reveal_at": 2.5},
+                    {"id": "b", "label": "Negative", "reveal_at": -1.0},
+                    {"id": "c", "label": "Garbage", "reveal_at": "soon"},
+                ],
+                edges=[],
+            )
+        )
+
+        by_id = {node["id"]: node for node in graph["nodes"]}
+        self.assertEqual(by_id["a"]["reveal_at"], 2.5)
+        self.assertNotIn("reveal_at", by_id["b"])
+        self.assertNotIn("reveal_at", by_id["c"])
+
 
 class TestValidateSuggestion(unittest.TestCase):
 
@@ -178,6 +195,21 @@ class TestValidateSuggestion(unittest.TestCase):
                 make_suggestion(start=10.0, end=end), total_duration=60.0
             )
 
+    def test_reveal_at_clamped_to_segment(self):
+        nodes = [
+            {"id": "a", "label": "Early", "reveal_at": 1.0},
+            {"id": "b", "label": "Too late", "reveal_at": 99.0},
+        ]
+        result = validate_suggestion(
+            make_suggestion(start=10.0, end=25.0, graph=make_graph(nodes=nodes)),
+            total_duration=60.0,
+        )
+
+        by_id = {node["id"]: node for node in result["graph"]["nodes"]}
+        self.assertEqual(by_id["a"]["reveal_at"], 1.0)
+        # Clamped to duration (15s) minus the end-of-segment beat.
+        self.assertEqual(by_id["b"]["reveal_at"], 14.0)
+
     def test_unknown_diagram_type_falls_back(self):
         result = validate_suggestion(
             make_suggestion(diagram_type="mindmap"), total_duration=60.0
@@ -197,6 +229,33 @@ class TestValidateSuggestion(unittest.TestCase):
 
         self.assertEqual(len(validated), 2)
         self.assertEqual([s["start"] for s in validated], [5.0, 30.0])
+
+
+def make_section(**overrides):
+    """Builds a minimal stage-1 detection section, with optional overrides."""
+    section = {
+        "start": 10.0,
+        "end": 25.0,
+        "diagram_type": "flowchart",
+        "transcript_excerpt": "First you record, then you edit, then you publish.",
+        "reason": "Speaker enumerates a three-step process.",
+    }
+    section.update(overrides)
+    return section
+
+
+def make_design(**overrides):
+    """Builds a minimal stage-2 design response, with optional overrides."""
+    design = {"title": "Podcast workflow", "graph": make_graph()}
+    design.update(overrides)
+    return design
+
+
+def mock_json_response(payload):
+    """Builds a mocked Groq chat completion returning ``payload`` as JSON."""
+    import json
+
+    return Mock(choices=[Mock(message=Mock(content=json.dumps(payload)))])
 
 
 class TestDiagramDetectorLLM(unittest.TestCase):
@@ -227,42 +286,78 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         self.assertIn("Hello world.", formatted)
         self.assertIn("[3.50s - 7.00s]", formatted)
 
-    def test_extract_suggestions_formats(self):
-        suggestion = make_suggestion()
+    def test_extract_list_formats(self):
+        section = make_section()
 
-        # {"diagrams": [...]} format
+        # {"sections": [...]} format
         self.assertEqual(
-            DiagramDetectorLLM._extract_suggestions({"diagrams": [suggestion]}),
-            [suggestion],
+            DiagramDetectorLLM._extract_list({"sections": [section]}, "sections"),
+            [section],
         )
         # Direct array format
         self.assertEqual(
-            DiagramDetectorLLM._extract_suggestions([suggestion]), [suggestion]
+            DiagramDetectorLLM._extract_list([section], "sections"), [section]
         )
         # First list found in an unexpected key
         self.assertEqual(
-            DiagramDetectorLLM._extract_suggestions({"results": [suggestion]}),
-            [suggestion],
+            DiagramDetectorLLM._extract_list({"results": [section]}, "sections"),
+            [section],
         )
         # No list at all
         with self.assertRaises(ValueError):
-            DiagramDetectorLLM._extract_suggestions({"diagrams": "nope"})
+            DiagramDetectorLLM._extract_list({"sections": "nope"}, "sections")
 
     @patch("backend.features.diagram.detector.Groq")
-    def test_suggest_diagrams_validates_llm_output(self, mock_groq_class):
-        import json
+    def test_two_stage_suggest_diagrams(self, mock_groq_class):
+        # Stage 1 finds two sections; stage 2 designs each in turn.
+        detection = {"sections": [make_section(), make_section(start=30.0, end=45.0)]}
+        create = mock_groq_class.return_value.chat.completions.create
+        create.side_effect = [
+            mock_json_response(detection),
+            mock_json_response(make_design()),
+            mock_json_response(make_design(title="Second diagram")),
+        ]
 
-        raw = {
-            "diagrams": [
-                make_suggestion(),
-                make_suggestion(start=100.0, end=110.0),  # beyond duration → dropped
-            ]
-        }
-        mock_response = Mock()
-        mock_response.choices = [Mock(message=Mock(content=json.dumps(raw)))]
-        mock_groq_class.return_value.chat.completions.create.return_value = (
-            mock_response
-        )
+        llm = DiagramDetectorLLM(api_key="test_key")
+        transcript = [{"start": 0.0, "end": 60.0, "text": "Test"}]
+
+        result = llm.suggest_diagrams(transcript)
+
+        self.assertEqual(create.call_count, 3)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["start"], 10.0)
+        self.assertEqual(result[0]["title"], "Podcast workflow")
+        self.assertEqual(result[0]["graph"]["reveal_order"], ["a", "b", "c"])
+        self.assertEqual(result[1]["title"], "Second diagram")
+
+    @patch("backend.features.diagram.detector.Groq")
+    def test_out_of_bounds_section_dropped(self, mock_groq_class):
+        detection = {"sections": [make_section(), make_section(start=100.0, end=110.0)]}
+        create = mock_groq_class.return_value.chat.completions.create
+        create.side_effect = [
+            mock_json_response(detection),
+            mock_json_response(make_design()),
+            mock_json_response(make_design()),
+        ]
+
+        llm = DiagramDetectorLLM(api_key="test_key")
+        transcript = [{"start": 0.0, "end": 60.0, "text": "Test"}]
+
+        result = llm.suggest_diagrams(transcript)
+
+        # Both sections get designed, but the out-of-bounds one fails validation.
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["start"], 10.0)
+
+    @patch("backend.features.diagram.detector.Groq")
+    def test_failed_design_skips_section_only(self, mock_groq_class):
+        detection = {"sections": [make_section(), make_section(start=30.0, end=45.0)]}
+        create = mock_groq_class.return_value.chat.completions.create
+        create.side_effect = [
+            mock_json_response(detection),
+            Exception("groq exploded"),  # first design call fails
+            mock_json_response(make_design(title="Survivor")),
+        ]
 
         llm = DiagramDetectorLLM(api_key="test_key")
         transcript = [{"start": 0.0, "end": 60.0, "text": "Test"}]
@@ -270,8 +365,33 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         result = llm.suggest_diagrams(transcript)
 
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["start"], 10.0)
-        self.assertEqual(result[0]["graph"]["reveal_order"], ["a", "b", "c"])
+        self.assertEqual(result[0]["title"], "Survivor")
+
+    @patch("backend.features.diagram.detector.Groq")
+    def test_design_reveal_at_converted_to_segment_offsets(self, mock_groq_class):
+        # The design stage answers on the transcript's clock; suggestions carry
+        # offsets relative to the segment start.
+        nodes = [
+            {"id": "a", "label": "Record", "reveal_at": 12.0},
+            {"id": "b", "label": "Edit", "reveal_at": 18.5},
+            {"id": "c", "label": "Publish"},
+        ]
+        create = mock_groq_class.return_value.chat.completions.create
+        create.side_effect = [
+            mock_json_response({"sections": [make_section(start=10.0, end=25.0)]}),
+            mock_json_response(make_design(graph=make_graph(nodes=nodes))),
+        ]
+
+        llm = DiagramDetectorLLM(api_key="test_key")
+        transcript = [{"start": 0.0, "end": 60.0, "text": "Test"}]
+
+        result = llm.suggest_diagrams(transcript)
+
+        self.assertEqual(len(result), 1)
+        by_id = {node["id"]: node for node in result[0]["graph"]["nodes"]}
+        self.assertAlmostEqual(by_id["a"]["reveal_at"], 2.0)
+        self.assertAlmostEqual(by_id["b"]["reveal_at"], 8.5)
+        self.assertNotIn("reveal_at", by_id["c"])
 
     @patch("backend.features.diagram.detector.DiagramDetectorLLM")
     def test_module_level_suggest_diagrams(self, mock_llm_class):

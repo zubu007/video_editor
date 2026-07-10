@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from moviepy import VideoFileClip, concatenate_videoclips
+from pathlib import Path
+
+from moviepy import (
+    CompositeVideoClip,
+    ImageClip,
+    VideoFileClip,
+    concatenate_videoclips,
+)
 
 from backend.features.face_detection.detect import detect_face_center
+
+# Stock B-roll files with these extensions are still images, not videos.
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
 def _subclip(video: VideoFileClip, start: float, end: float):
@@ -25,9 +35,7 @@ def _crop(clip, width: int, height: int, x_center: float, y_center: float):
         return clip.cropped(
             width=width, height=height, x_center=x_center, y_center=y_center
         )
-    return clip.crop(
-        width=width, height=height, x_center=x_center, y_center=y_center
-    )
+    return clip.crop(width=width, height=height, x_center=x_center, y_center=y_center)
 
 
 def _without_audio(clip):
@@ -42,6 +50,40 @@ def _with_audio(clip, audio):
     if hasattr(clip, "with_audio"):
         return clip.with_audio(audio)
     return clip.set_audio(audio)
+
+
+def _with_position(clip, position):
+    """Position a clip within a composite across MoviePy 1.x and 2.x APIs."""
+    if hasattr(clip, "with_position"):
+        return clip.with_position(position)
+    return clip.set_position(position)
+
+
+def _with_duration(clip, duration: float):
+    """Set a clip's duration across MoviePy 1.x and 2.x APIs."""
+    if hasattr(clip, "with_duration"):
+        return clip.with_duration(duration)
+    return clip.set_duration(duration)
+
+
+def _apply_diagram_overlay(clip, overlay: VideoFileClip, offset: float):
+    """Composite the slice of ``overlay`` starting at ``offset`` onto ``clip``.
+
+    ``overlay`` is a full diagram animation timed to its edit range on the
+    original video; ``offset`` is how far into that range ``clip`` starts, so
+    cutting part of the range keeps the animation in sync with the remaining
+    speech. The overlay is scaled to fit inside the frame (never cropped) and
+    centered. If the offset falls past the end of the overlay (frame-rate
+    rounding), the clip is returned unchanged.
+    """
+    if offset >= overlay.duration:
+        return clip
+    piece = _subclip(overlay, offset, min(offset + clip.duration, overlay.duration))
+    scale = min(clip.w / piece.w, clip.h / piece.h)
+    if scale != 1.0:
+        piece = _resize(piece, scale)
+    piece = _with_position(_without_audio(piece), "center")
+    return CompositeVideoClip([clip, piece])
 
 
 def _fit_frame(clip, width: int, height: int):
@@ -60,10 +102,14 @@ def _stock_clip(footage_path: str, duration: float):
     """Load stock footage trimmed (or looped) to exactly ``duration`` seconds.
 
     The clip is silent — it is meant to overlay B-roll over speech, so the
-    caller supplies the original audio. When the footage is shorter than the
+    caller supplies the original audio. A still image (see IMAGE_EXTENSIONS)
+    is held for the full span. When video footage is shorter than the
     requested span it is looped (fresh readers per copy to avoid sharing a
     single decoder); when longer it is trimmed from the start.
     """
+    if Path(footage_path).suffix.lower() in IMAGE_EXTENSIONS:
+        return _with_duration(ImageClip(footage_path), duration)
+
     clip = VideoFileClip(footage_path)
     if clip.duration >= duration:
         fitted = _subclip(clip, 0, duration)
@@ -171,25 +217,31 @@ def _active_range(point: float, ranges: list) -> dict | None:
 
 
 def _segment_spans(
-    start: float, end: float, zoom_ranges: list, stock_ranges: list
-) -> list[tuple[float, float, float | None, str | None]]:
-    """Split ``[start, end)`` into spans tagged with a zoom level and footage.
+    start: float,
+    end: float,
+    zoom_ranges: list,
+    stock_ranges: list,
+    diagram_ranges: list | None = None,
+) -> list[tuple[float, float, float | None, str | None, dict | None]]:
+    """Split ``[start, end)`` into spans tagged with the effects covering them.
 
-    Each returned tuple is ``(span_start, span_end, zoom_level, footage_path)``.
-    The interval is cut at every zoom and stock-footage boundary that falls
-    inside it, so each resulting span is uniformly covered (or not) by a single
-    zoom range and a single stock-footage range. ``zoom_level`` / ``footage_path``
-    are ``None`` outside their respective ranges. Effect selection per span is
-    decided by the caller (stock footage takes precedence over zoom).
+    Each returned tuple is ``(span_start, span_end, zoom_level, footage_path,
+    diagram_range)``. The interval is cut at every zoom, stock-footage and
+    diagram boundary that falls inside it, so each resulting span is uniformly
+    covered (or not) by at most one range of each kind. ``zoom_level`` /
+    ``footage_path`` / ``diagram_range`` are ``None`` outside their respective
+    ranges. Effect selection per span is decided by the caller (stock footage
+    takes precedence over zoom; diagrams composite on top of either).
     """
+    diagrams = diagram_ranges or []
     boundaries = {start, end}
-    for r in list(zoom_ranges) + list(stock_ranges):
+    for r in list(zoom_ranges) + list(stock_ranges) + list(diagrams):
         for edge in (r["start"], r["end"]):
             if start < edge < end:
                 boundaries.add(edge)
 
     points = sorted(boundaries)
-    spans: list[tuple[float, float, float | None, str | None]] = []
+    spans: list[tuple[float, float, float | None, str | None, dict | None]] = []
     for span_start, span_end in zip(points, points[1:]):
         if span_end <= span_start:
             continue
@@ -198,7 +250,15 @@ def _segment_spans(
         stock = _active_range(midpoint, stock_ranges)
         level = zoom.get("level", 1.2) if zoom else None
         footage_path = stock.get("footage_path") if stock else None
-        spans.append((span_start, span_end, level, footage_path))
+        spans.append(
+            (
+                span_start,
+                span_end,
+                level,
+                footage_path,
+                _active_range(midpoint, diagrams),
+            )
+        )
     return spans
 
 
@@ -208,17 +268,20 @@ def render_with_edits(
     zoom_ranges: list,
     output_path: str,
     stock_footage_ranges: list | None = None,
+    diagram_ranges: list | None = None,
 ) -> None:
-    """Render a video by removing cuts and applying zoom and B-roll effects.
+    """Render a video by removing cuts and applying zoom/B-roll/diagram effects.
 
-    ``cut_ranges``, ``zoom_ranges`` and ``stock_footage_ranges`` are all
-    expressed on the *original* video timeline. Cut ranges are removed; the
-    surviving segments are then split at every zoom and stock-footage boundary
-    so each sub-clip carries at most one effect, and the result is concatenated.
+    ``cut_ranges``, ``zoom_ranges``, ``stock_footage_ranges`` and
+    ``diagram_ranges`` are all expressed on the *original* video timeline. Cut
+    ranges are removed; the surviving segments are then split at every effect
+    boundary so each sub-clip carries at most one effect of each kind, and the
+    result is concatenated.
 
     Within a span, stock footage takes precedence over zoom: a B-roll cutaway
     replaces the speaker's video for the span while keeping the original audio,
-    so zooming it would be meaningless.
+    so zooming it would be meaningless. Diagram overlays composite on top of
+    whichever base the span ends up with.
 
     Args:
         video_path (str): Path to the source video file.
@@ -229,20 +292,41 @@ def render_with_edits(
         stock_footage_ranges (list | None): B-roll overlays, each
             ``{"start", "end", "footage_path"}`` where ``footage_path`` points to
             a local stock-footage file to show over the span. Defaults to none.
+        diagram_ranges (list | None): Animated diagram overlays, each
+            ``{"start", "end", "overlay_path"}`` where ``overlay_path`` points
+            to a rendered alpha-channel diagram video timed to the range.
     """
     video = VideoFileClip(video_path)
     sorted_zooms = sorted(zoom_ranges, key=lambda r: r["start"])
     sorted_stock = sorted(stock_footage_ranges or [], key=lambda r: r["start"])
+    sorted_diagrams = sorted(diagram_ranges or [], key=lambda r: r["start"])
+    overlays = _load_diagram_overlays(sorted_diagrams)
 
     clips_to_keep = []
     for interval_start, interval_end in _kept_intervals(cut_ranges, video.duration):
         clips_to_keep.extend(
             _effect_clips(
-                video, interval_start, interval_end, sorted_zooms, sorted_stock
+                video,
+                interval_start,
+                interval_end,
+                sorted_zooms,
+                sorted_stock,
+                sorted_diagrams,
+                overlays,
             )
         )
 
     _write_concatenated(video, clips_to_keep, output_path)
+
+
+def _load_diagram_overlays(diagram_ranges: list) -> dict:
+    """Open each diagram overlay video once, keyed by path (with alpha)."""
+    overlays: dict[str, VideoFileClip] = {}
+    for r in diagram_ranges:
+        path = r.get("overlay_path")
+        if path and path not in overlays:
+            overlays[path] = VideoFileClip(path, has_mask=True)
+    return overlays
 
 
 def _effect_clips(
@@ -251,11 +335,13 @@ def _effect_clips(
     interval_end: float,
     zoom_ranges: list,
     stock_ranges: list,
+    diagram_ranges: list | None = None,
+    diagram_overlays: dict | None = None,
 ) -> list:
     """Build the effect-applied subclips covering one kept interval."""
     clips = []
-    for span_start, span_end, level, footage_path in _segment_spans(
-        interval_start, interval_end, zoom_ranges, stock_ranges
+    for span_start, span_end, level, footage_path, diagram in _segment_spans(
+        interval_start, interval_end, zoom_ranges, stock_ranges, diagram_ranges
     ):
         clip = _subclip(video, span_start, span_end)
         if footage_path:
@@ -263,6 +349,12 @@ def _effect_clips(
         elif level and level != 1.0:
             focus = _focus_for_span(video, span_start, span_end)
             clip = _apply_zoom(clip, level, focus)
+        if diagram:
+            overlay = (diagram_overlays or {}).get(diagram.get("overlay_path"))
+            if overlay is not None:
+                clip = _apply_diagram_overlay(
+                    clip, overlay, span_start - diagram["start"]
+                )
         clips.append(clip)
     return clips
 
@@ -271,7 +363,11 @@ def _write_concatenated(video: VideoFileClip, clips: list, output_path: str) -> 
     """Concatenate ``clips`` and write the result (empty video when none)."""
     if clips:
         final_clip = concatenate_videoclips(clips)
-        final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
+        # Still-image overlays have no fps of their own; fall back to the source's.
+        fps = getattr(final_clip, "fps", None) or video.fps
+        final_clip.write_videofile(
+            output_path, fps=fps, codec="libx264", audio_codec="aac"
+        )
     else:
         # If everything was cut, write an empty video.
         _subclip(video, 0, 0).write_videofile(
@@ -286,15 +382,17 @@ def render_timeline(
     cut_ranges: list | None = None,
     zoom_ranges: list | None = None,
     stock_footage_ranges: list | None = None,
+    diagram_ranges: list | None = None,
 ) -> None:
     """Render ordered timeline segments, composing source-time edits.
 
     ``segments`` is an *ordered* list of ``{"start", "end"}`` source ranges; the
     output plays them in list order, which may differ from source order (segments
     can be rearranged, and gaps between them are omitted). Cut ranges are
-    subtracted from every segment they intersect, and zoom / stock-footage
-    effects are applied to the spans they cover — all expressed on the original
-    video's timeline, with the same semantics as :func:`render_with_edits`.
+    subtracted from every segment they intersect, and zoom / stock-footage /
+    diagram effects are applied to the spans they cover — all expressed on the
+    original video's timeline, with the same semantics as
+    :func:`render_with_edits`.
 
     Args:
         video_path (str): Path to the source video file.
@@ -304,12 +402,16 @@ def render_timeline(
         zoom_ranges (list | None): Zoom ranges, each ``{"start", "end", "level"}``.
         stock_footage_ranges (list | None): B-roll overlays, each
             ``{"start", "end", "footage_path"}``.
+        diagram_ranges (list | None): Animated diagram overlays, each
+            ``{"start", "end", "overlay_path"}``.
     """
     video = VideoFileClip(video_path)
     duration = float(video.duration)
     cuts = sorted(cut_ranges or [], key=lambda r: r["start"])
     zooms = sorted(zoom_ranges or [], key=lambda r: r["start"])
     stock = sorted(stock_footage_ranges or [], key=lambda r: r["start"])
+    diagrams = sorted(diagram_ranges or [], key=lambda r: r["start"])
+    overlays = _load_diagram_overlays(diagrams)
 
     clips = []
     for segment in segments:
@@ -321,7 +423,15 @@ def render_timeline(
             segment_start, segment_end, cuts
         ):
             clips.extend(
-                _effect_clips(video, interval_start, interval_end, zooms, stock)
+                _effect_clips(
+                    video,
+                    interval_start,
+                    interval_end,
+                    zooms,
+                    stock,
+                    diagrams,
+                    overlays,
+                )
             )
 
     _write_concatenated(video, clips, output_path)

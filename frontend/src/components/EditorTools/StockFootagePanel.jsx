@@ -4,11 +4,16 @@ import styles from './StockFootagePanel.module.css';
 function StockFootageCard({ item, download, onSeek }) {
   const query = item.parameters?.search_query || '';
   const status = download?.status || 'idle';
+  const isImage =
+    (download?.mediaType || item.parameters?.media_type) === 'image';
 
   return (
     <div className={styles.card}>
       <div className={styles.cardHeader}>
         <span className={styles.query}>{query || 'Untitled clip'}</span>
+        <span className={styles.mediaBadge}>
+          {isImage ? 'Still image · max 3s' : 'Video clip · max 5s'}
+        </span>
         <button
           type="button"
           className={styles.jumpButton}
@@ -20,12 +25,20 @@ function StockFootageCard({ item, download, onSeek }) {
 
       <div className={styles.preview}>
         {status === 'done' && download?.previewUrl ? (
-          <video
-            className={styles.video}
-            src={download.previewUrl}
-            controls
-            preload="metadata"
-          />
+          isImage ? (
+            <img
+              className={styles.video}
+              src={download.previewUrl}
+              alt={query || 'Stock still image'}
+            />
+          ) : (
+            <video
+              className={styles.video}
+              src={download.previewUrl}
+              controls
+              preload="metadata"
+            />
+          )
         ) : (
           <div className={styles.placeholder}>
             {status === 'loading' && 'Downloading B-roll…'}
@@ -66,8 +79,9 @@ export default function StockFootagePanel({
         <div>
           <h3>Stock Footage</h3>
           <p>
-            Download B-roll for the stock-footage suggestions in your editing
-            plan, then preview where each clip will be inserted.
+            Download B-roll — short video clips and still images — for the
+            stock-footage suggestions in your editing plan, then preview where
+            each will be inserted.
           </p>
         </div>
         <button

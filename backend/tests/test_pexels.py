@@ -12,8 +12,11 @@ from backend.features.pexels.download import (
     PexelsAPIError,
     _download_video,
     _get_api_key,
+    _search_photos,
     _search_videos,
     download_stock_footage,
+    download_stock_media,
+    download_stock_photo,
 )
 
 
@@ -147,6 +150,93 @@ class TestDownloadStockFootage:
 
         with pytest.raises(ValueError, match="Invalid quality"):
             download_stock_footage("ocean", quality="ultra_hd")
+
+    @patch("backend.features.pexels.download._download_video")
+    @patch("backend.features.pexels.download._search_photos")
+    @patch("backend.features.pexels.download._get_api_key")
+    def test_download_stock_photo_success(
+        self,
+        mock_get_api_key: MagicMock,
+        mock_search_photos: MagicMock,
+        mock_download_video: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Test successful stock photo download."""
+        mock_get_api_key.return_value = "test_key"
+        mock_search_photos.return_value = {
+            "photos": [
+                {
+                    "id": 777,
+                    "src": {
+                        "large2x": "https://images.pexels.com/photos/777/pexels-photo-777.jpeg?w=1880"
+                    },
+                }
+            ]
+        }
+
+        result = download_stock_photo("mountain lake", output_dir=str(tmp_path))
+
+        assert "pexels_mountain_lake_777.jpeg" in result
+        mock_download_video.assert_called_once()
+
+    @patch("backend.features.pexels.download._search_photos")
+    @patch("backend.features.pexels.download._get_api_key")
+    def test_download_stock_photo_no_photos(
+        self, mock_get_api_key: MagicMock, mock_search_photos: MagicMock
+    ) -> None:
+        """Test error when no photos are found."""
+        mock_get_api_key.return_value = "test_key"
+        mock_search_photos.return_value = {"photos": []}
+
+        with pytest.raises(ValueError, match="No photos found for search term"):
+            download_stock_photo("nonexistent_term")
+
+    @patch("backend.features.pexels.download._get_api_key")
+    def test_download_stock_photo_invalid_size(
+        self, mock_get_api_key: MagicMock
+    ) -> None:
+        """Test error with invalid size parameter."""
+        mock_get_api_key.return_value = "test_key"
+
+        with pytest.raises(ValueError, match="Invalid size"):
+            download_stock_photo("mountain lake", size="gigantic")
+
+    @patch("backend.features.pexels.download.download_stock_footage")
+    def test_download_stock_media_dispatches_video(
+        self, mock_footage: MagicMock
+    ) -> None:
+        """Test that media_type='video' routes to the video downloader."""
+        mock_footage.return_value = "/tmp/clip.mp4"
+
+        result = download_stock_media("ocean", media_type="video", output_dir="/tmp")
+
+        assert result == "/tmp/clip.mp4"
+        mock_footage.assert_called_once_with("ocean", output_dir="/tmp")
+
+    @patch("backend.features.pexels.download.download_stock_photo")
+    def test_download_stock_media_dispatches_image(self, mock_photo: MagicMock) -> None:
+        """Test that media_type='image' routes to the photo downloader."""
+        mock_photo.return_value = "/tmp/photo.jpeg"
+
+        result = download_stock_media("ocean", media_type="image", output_dir="/tmp")
+
+        assert result == "/tmp/photo.jpeg"
+        mock_photo.assert_called_once_with("ocean", output_dir="/tmp")
+
+    def test_download_stock_media_invalid_type(self) -> None:
+        """Test error for an unknown media type."""
+        with pytest.raises(ValueError, match="Invalid media_type"):
+            download_stock_media("ocean", media_type="gif")
+
+    @patch("backend.features.pexels.download.requests.get")
+    def test_search_photos_api_error(self, mock_get: MagicMock) -> None:
+        """Test API error handling during photo search."""
+        import requests
+
+        mock_get.side_effect = requests.exceptions.RequestException("API Error")
+
+        with pytest.raises(PexelsAPIError, match="Failed to search Pexels API"):
+            _search_photos("ocean", "test_key")
 
     @patch("backend.features.pexels.download._download_video")
     @patch("backend.features.pexels.download._search_videos")

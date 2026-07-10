@@ -8,6 +8,9 @@ import SilenceTool from './components/EditorTools/SilenceTool';
 import CaptionTool from './components/EditorTools/CaptionTool';
 import EditingPlanPanel from './components/EditorTools/EditingPlanPanel';
 import StockFootagePanel from './components/EditorTools/StockFootagePanel';
+import DiagramPanel from './components/EditorTools/DiagramPanel';
+import ChatPanel from './components/Assistant/ChatPanel';
+import InspectorPanel from './components/Inspector/InspectorPanel';
 import SettingsModal from './components/Settings/SettingsModal';
 import useSettings from './hooks/useSettings';
 import {
@@ -25,9 +28,12 @@ import {
   getProjectTimeline,
   saveProjectTimeline,
   generateEditingPlan,
+  suggestDiagrams,
+  renderDiagramPreview,
   downloadStockFootage,
   getStockFootageURL,
   getAbsoluteAPIURL,
+  sendProjectChat,
 } from './services/api';
 import './App.css';
 
@@ -59,9 +65,20 @@ function App() {
   const [editOperations, setEditOperations] = useState([]);
   const [savedZoomEdits, setSavedZoomEdits] = useState([]);
   const [savedStockEdits, setSavedStockEdits] = useState([]);
+  const [savedDiagramEdits, setSavedDiagramEdits] = useState([]);
   const [editingPlan, setEditingPlan] = useState([]);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [planError, setPlanError] = useState(null);
+  const [diagramSuggestions, setDiagramSuggestions] = useState([]);
+  const [isSuggestingDiagrams, setIsSuggestingDiagrams] = useState(false);
+  const [diagramError, setDiagramError] = useState(null);
+  const [savingDiagramId, setSavingDiagramId] = useState(null);
+  // Per-suggestion motion-diagram previews: {[suggestionId]: {status, url, error}}.
+  const [diagramPreviews, setDiagramPreviews] = useState({});
+  // Timeline selection driving the inspector: {kind: 'segment'|'overlay', id}.
+  const [inspected, setInspected] = useState(null);
+  // Per-overlay status of stock footage re-downloads started from the inspector.
+  const [stockRefetch, setStockRefetch] = useState({});
   const [stockDownloads, setStockDownloads] = useState({});
   const [isDownloadingStock, setIsDownloadingStock] = useState(false);
   const [stockError, setStockError] = useState(null);
@@ -75,7 +92,28 @@ function App() {
   const [isDetectingSilence, setIsDetectingSilence] = useState(false);
   const [isConfirmingCuts, setIsConfirmingCuts] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
+  // Assistant chat feed: 'log' entries (editor activity) interleaved with
+  // 'user'/'assistant' conversation turns.
+  const [chatMessages, setChatMessages] = useState([]);
+  const [isChatSending, setIsChatSending] = useState(false);
+  const [chatError, setChatError] = useState(null);
   const videoPlayerRef = useRef(null);
+
+  // Append an editor-activity note to the assistant feed (readable log line).
+  const logActivity = (content) => {
+    setChatMessages((messages) => [
+      ...messages,
+      {
+        id: crypto.randomUUID(),
+        role: 'log',
+        content,
+        time: new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      },
+    ]);
+  };
 
   // Timeline preview playback reads segments via a ref so the media-element
   // event handlers never act on a stale segment list.
@@ -114,13 +152,51 @@ function App() {
     setSavedStockEdits(
       edits.filter((edit) => edit.type === 'insert_stock_footage')
     );
+    setSavedDiagramEdits(edits.filter((edit) => edit.type === 'diagram'));
   };
+
+  // Overlay edits shown as movable clips on the timeline's overlay lanes.
+  const timelineOverlays = useMemo(
+    () => [...savedZoomEdits, ...savedStockEdits, ...savedDiagramEdits],
+    [savedZoomEdits, savedStockEdits, savedDiagramEdits]
+  );
 
   // Stock-footage suggestions extracted from the current editing plan.
   const stockFootageItems = useMemo(
     () => editingPlan.filter((item) => item.feature === 'insert_stock_footage'),
     [editingPlan]
   );
+
+  // Resolve the inspected id against current state so the inspector always
+  // shows live values and closes itself when the item is deleted.
+  const inspectorSelection = useMemo(() => {
+    if (!inspected) return null;
+    if (inspected.kind === 'segment') {
+      const index = timelineSegments.findIndex(
+        (segment) => segment.id === inspected.id
+      );
+      if (index === -1) return null;
+      return { kind: 'segment', segment: timelineSegments[index], index };
+    }
+    const overlay = timelineOverlays.find((entry) => entry.id === inspected.id);
+    return overlay ? { kind: 'overlay', overlay } : null;
+  }, [inspected, timelineSegments, timelineOverlays]);
+
+  const handleSelectSegment = (segmentId) => {
+    if (segmentId) {
+      setInspected({ kind: 'segment', id: segmentId });
+    } else {
+      setInspected((current) => (current?.kind === 'segment' ? null : current));
+    }
+  };
+
+  const handleSelectOverlay = (overlayId) => {
+    if (overlayId) {
+      setInspected({ kind: 'overlay', id: overlayId });
+    } else {
+      setInspected((current) => (current?.kind === 'overlay' ? null : current));
+    }
+  };
 
   // Reset all per-project derived state before loading a new source video.
   const resetProjectStateForLoad = () => {
@@ -137,12 +213,20 @@ function App() {
     setEditOperations([]);
     setSavedZoomEdits([]);
     setSavedStockEdits([]);
+    setSavedDiagramEdits([]);
     setEditingPlan([]);
+    setDiagramSuggestions([]);
+    setDiagramError(null);
+    setSavingDiagramId(null);
+    setInspected(null);
+    setStockRefetch({});
     setStockDownloads({});
     setStockError(null);
     setPlanError(null);
     setToolError(null);
     setRenderResult(null);
+    setChatMessages([]);
+    setChatError(null);
   };
 
   // Given a backend response carrying file_id/project_id/media_asset_id (from either a
@@ -165,8 +249,16 @@ function App() {
     setWaveformData(waveform.waveform);
     setSourceDuration(waveform.duration);
     setTranscriptWords(transcript.words || []);
+    logActivity(
+      `Video loaded (${waveform.duration.toFixed(1)}s). Transcript extracted with ${
+        (transcript.words || []).length
+      } words.`
+    );
     const edits = await getProjectEdits(response.project_id);
     applyLoadedEdits(edits.edits);
+    if ((edits.edits || []).length > 0) {
+      logActivity(`Restored ${edits.edits.length} saved edits from the project.`);
+    }
 
     // Restore a saved timeline arrangement, or start from the full source as
     // a single segment.
@@ -319,6 +411,16 @@ function App() {
     setTimelineDirty(true);
   };
 
+  // Trim a segment's source range from the inspector's numeric fields.
+  const handleUpdateSegment = (segmentId, changes) => {
+    setTimelineSegments((segments) =>
+      segments.map((segment) =>
+        segment.id === segmentId ? { ...segment, ...changes } : segment
+      )
+    );
+    setTimelineDirty(true);
+  };
+
   const handleResetTimeline = () => {
     if (!sourceDuration) return;
     setTimelineSegments([
@@ -355,6 +457,11 @@ function App() {
         setHasSavedTimeline(false);
       }
       setTimelineDirty(false);
+      logActivity(
+        result.segments.length > 0
+          ? `Timeline saved with ${result.segments.length} segments.`
+          : 'Timeline reset to the original order.'
+      );
     } catch (error) {
       console.error('Error saving timeline:', error);
       setToolError('Could not save the timeline.');
@@ -387,6 +494,11 @@ function App() {
           enabled: true,
           settings: result.settings,
         }))
+      );
+      logActivity(
+        `Silence detection found ${result.count} pauses (${(
+          result.total_silence_duration || 0
+        ).toFixed(1)}s of silence).`
       );
     } catch (error) {
       console.error('Error detecting silence:', error);
@@ -431,6 +543,7 @@ function App() {
       const edits = await getProjectEdits(projectId);
       applyLoadedEdits(edits.edits);
       setDetectedPauses([]);
+      logActivity(`Saved ${enabledPauses.length} silence cuts to the project.`);
     } catch (error) {
       console.error('Error confirming silence cuts:', error);
       setToolError('Could not save silence cuts.');
@@ -469,6 +582,249 @@ function App() {
     }
   };
 
+  const DEFAULT_OVERLAY_DURATION = 3;
+
+  // Which state slice holds each overlay type, so timeline drag/trim/delete
+  // can update the matching list without refetching everything.
+  const overlaySettersByType = {
+    zoom: setSavedZoomEdits,
+    insert_stock_footage: setSavedStockEdits,
+    diagram: setSavedDiagramEdits,
+  };
+
+  const handleAddOverlay = async (type) => {
+    if (!projectId || !sourceDuration) return;
+
+    const length = Math.min(DEFAULT_OVERLAY_DURATION, sourceDuration);
+    const start = Math.max(0, Math.min(currentTime, sourceDuration - length));
+
+    let metadata = {};
+    if (type === 'zoom') {
+      metadata = { zoom_level: 1.2 };
+    } else if (type === 'insert_stock_footage') {
+      const query = window.prompt('Search Pexels for B-roll footage:');
+      if (!query?.trim()) return;
+      metadata = { search_query: query.trim() };
+    } else if (type === 'diagram') {
+      metadata = { diagram_type: 'flowchart' };
+    }
+
+    setToolError(null);
+    try {
+      await createProjectEdits(projectId, [
+        {
+          type,
+          source: 'timeline',
+          start,
+          end: start + length,
+          enabled: true,
+          media_asset_id: mediaAssetId,
+          metadata,
+        },
+      ]);
+      const edits = await getProjectEdits(projectId);
+      applyLoadedEdits(edits.edits);
+      logActivity(`Added a ${type.replaceAll('_', ' ')} overlay at ${start.toFixed(1)}s.`);
+    } catch (error) {
+      console.error('Error adding overlay:', error);
+      setToolError('Could not add the overlay.');
+    }
+  };
+
+  const handleUpdateOverlay = async (overlay, changes) => {
+    if (!projectId) return;
+
+    const setEdits = overlaySettersByType[overlay.type];
+    // Optimistic update so the clip doesn't snap back while the save runs.
+    setEdits?.((edits) =>
+      edits.map((edit) =>
+        edit.id === overlay.id ? { ...edit, ...changes } : edit
+      )
+    );
+    setToolError(null);
+    try {
+      const updated = await updateProjectEdit(projectId, overlay.id, changes);
+      setEdits?.((edits) =>
+        edits.map((edit) => (edit.id === updated.id ? updated : edit))
+      );
+    } catch (error) {
+      console.error('Error updating overlay:', error);
+      setToolError('Could not save the overlay change.');
+      try {
+        const edits = await getProjectEdits(projectId);
+        applyLoadedEdits(edits.edits);
+      } catch (reloadError) {
+        console.error('Error reloading edits:', reloadError);
+      }
+    }
+  };
+
+  const handleDeleteOverlay = async (overlay) => {
+    if (!projectId) return;
+
+    setToolError(null);
+    try {
+      await deleteProjectEdit(projectId, overlay.id);
+      overlaySettersByType[overlay.type]?.((edits) =>
+        edits.filter((edit) => edit.id !== overlay.id)
+      );
+    } catch (error) {
+      console.error('Error deleting overlay:', error);
+      setToolError('Could not delete the overlay.');
+    }
+  };
+
+  // Fetch (or re-fetch) a Pexels clip for one saved stock-footage overlay and
+  // persist the new file on the edit, so render uses the replacement clip.
+  const handleRefetchStockFootage = async (overlay, query) => {
+    const trimmed = query?.trim();
+    if (!trimmed) return;
+
+    setStockRefetch((current) => ({
+      ...current,
+      [overlay.id]: { status: 'loading' },
+    }));
+    try {
+      const mediaType =
+        overlay.metadata?.media_type === 'image' ? 'image' : 'video';
+      const result = await downloadStockFootage(trimmed, 'hd', mediaType);
+      await handleUpdateOverlay(overlay, {
+        metadata: {
+          ...overlay.metadata,
+          search_query: trimmed,
+          footage_path: result.file_path,
+          media_type: result.media_type || mediaType,
+        },
+      });
+      setStockRefetch((current) => ({
+        ...current,
+        [overlay.id]: { status: 'done' },
+      }));
+    } catch (error) {
+      console.error('Error re-downloading stock footage:', error);
+      setStockRefetch((current) => ({
+        ...current,
+        [overlay.id]: {
+          status: 'error',
+          error: error.response?.data?.detail || 'Download failed.',
+        },
+      }));
+    }
+  };
+
+  const handleSuggestDiagrams = async () => {
+    if (!fileId) return;
+
+    setIsSuggestingDiagrams(true);
+    setDiagramError(null);
+    try {
+      const result = await suggestDiagrams(fileId, 'base');
+      setDiagramSuggestions(
+        (result.diagrams || [])
+          .map((diagram) => ({ id: crypto.randomUUID(), ...diagram }))
+          .sort((a, b) => a.start - b.start)
+      );
+      logActivity(
+        `Diagram analysis suggested ${(result.diagrams || []).length} overlays.`
+      );
+    } catch (error) {
+      console.error('Error suggesting diagrams:', error);
+      const detail = error.response?.data?.detail;
+      setDiagramError(
+        detail
+          ? `Could not suggest diagrams: ${detail}`
+          : 'Could not suggest diagrams for this video.'
+      );
+    } finally {
+      setIsSuggestingDiagrams(false);
+    }
+  };
+
+  // Accept one diagram suggestion: persist it as a `diagram` edit so it shows
+  // up on the timeline's Diagram lane, then drop it from the suggestion list.
+  const handleAcceptDiagram = async (suggestion) => {
+    if (!projectId) return;
+
+    setSavingDiagramId(suggestion.id);
+    setDiagramError(null);
+    try {
+      await createProjectEdits(projectId, [
+        {
+          type: 'diagram',
+          source: 'diagram_suggestion',
+          start: Number(suggestion.start) || 0,
+          end: Number(suggestion.end) || 0,
+          enabled: true,
+          media_asset_id: mediaAssetId,
+          metadata: {
+            diagram_type: suggestion.diagram_type,
+            title: suggestion.title,
+            transcript_excerpt: suggestion.transcript_excerpt,
+            reason: suggestion.reason,
+            graph: suggestion.graph,
+          },
+        },
+      ]);
+      const edits = await getProjectEdits(projectId);
+      applyLoadedEdits(edits.edits);
+      setDiagramSuggestions((items) =>
+        items.filter((item) => item.id !== suggestion.id)
+      );
+      logActivity(
+        `Added diagram "${suggestion.title || suggestion.diagram_type}" to the timeline.`
+      );
+    } catch (error) {
+      console.error('Error saving diagram edit:', error);
+      setDiagramError('Could not add the diagram to the timeline.');
+    } finally {
+      setSavingDiagramId(null);
+    }
+  };
+
+  const handleDismissDiagram = (suggestionId) => {
+    setDiagramSuggestions((items) =>
+      items.filter((item) => item.id !== suggestionId)
+    );
+    setDiagramPreviews((previews) => {
+      if (!(suggestionId in previews)) return previews;
+      const next = { ...previews };
+      delete next[suggestionId];
+      return next;
+    });
+  };
+
+  // Render one suggestion's motion diagram with Manim and show it in the
+  // card's preview player. The server caches by spec, so re-renders are fast.
+  const handleRenderDiagramPreview = async (suggestion) => {
+    setDiagramPreviews((previews) => ({
+      ...previews,
+      [suggestion.id]: { status: 'rendering' },
+    }));
+    try {
+      const result = await renderDiagramPreview(suggestion);
+      setDiagramPreviews((previews) => ({
+        ...previews,
+        [suggestion.id]: {
+          status: 'done',
+          url: getAbsoluteAPIURL(result.video_url),
+        },
+      }));
+      logActivity(
+        `Rendered diagram preview "${suggestion.title || suggestion.diagram_type}".`
+      );
+    } catch (error) {
+      console.error('Error rendering diagram preview:', error);
+      const detail = error.response?.data?.detail;
+      setDiagramPreviews((previews) => ({
+        ...previews,
+        [suggestion.id]: {
+          status: 'error',
+          error: detail || 'Could not render the diagram preview.',
+        },
+      }));
+    }
+  };
+
   const handleGeneratePlan = async () => {
     if (!fileId) return;
 
@@ -486,6 +842,7 @@ function App() {
         }))
         .sort((a, b) => a.start - b.start);
       setEditingPlan(items);
+      logActivity(`AI editing plan generated with ${items.length} suggestions.`);
     } catch (error) {
       console.error('Error generating editing plan:', error);
       const detail = error.response?.data?.detail;
@@ -548,6 +905,7 @@ function App() {
       applyLoadedEdits(edits.edits);
       // Clear saved zoom items from the working plan to avoid re-saving them.
       setEditingPlan((items) => items.filter((item) => item.feature !== 'zoom'));
+      logActivity(`Saved ${zoomItems.length} zoom edits from the plan.`);
     } catch (error) {
       console.error('Error saving zoom edits:', error);
       setPlanError('Could not save zoom edits to the project.');
@@ -580,8 +938,10 @@ function App() {
         continue;
       }
 
+      const mediaType =
+        item.parameters?.media_type === 'image' ? 'image' : 'video';
       try {
-        const result = await downloadStockFootage(query);
+        const result = await downloadStockFootage(query, 'hd', mediaType);
         const filename = result.file_path.split('/').pop();
         setStockDownloads((current) => ({
           ...current,
@@ -591,6 +951,7 @@ function App() {
             filePath: result.file_path,
             previewUrl: getStockFootageURL(filename),
             searchQuery: query,
+            mediaType: result.media_type || mediaType,
           },
         }));
       } catch (error) {
@@ -641,6 +1002,7 @@ function App() {
             metadata: {
               search_query: download.searchQuery,
               footage_path: download.filePath,
+              media_type: download.mediaType || 'video',
             },
           };
         })
@@ -655,9 +1017,61 @@ function App() {
         savedIds.forEach((id) => delete next[id]);
         return next;
       });
+      logActivity(`Saved ${ready.length} stock footage clips to the project.`);
     } catch (error) {
       console.error('Error saving stock footage edits:', error);
       setStockError('Could not save stock footage edits to the project.');
+    }
+  };
+
+  // Send a user question to the project assistant. The conversation turns go
+  // as history; log entries and the transcript ride along as context.
+  const handleSendChatMessage = async (text) => {
+    if (!projectId || isChatSending) return;
+
+    const userMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: text,
+    };
+    const history = [...chatMessages, userMessage]
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .map(({ role, content }) => ({ role, content }));
+    const activityLog = chatMessages
+      .filter((message) => message.role === 'log')
+      .map((message) => `${message.time} ${message.content}`);
+
+    setChatMessages((messages) => [...messages, userMessage]);
+    setIsChatSending(true);
+    setChatError(null);
+    try {
+      const result = await sendProjectChat(projectId, history, {
+        transcript: transcriptWords.map((word) => word.word).join(' '),
+        activityLog,
+      });
+      // Surface each tool call the agent made as an activity log line, then
+      // the reply itself.
+      (result.actions || []).forEach((action) => {
+        logActivity(`Assistant: ${action.summary}`);
+      });
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), role: 'assistant', content: result.reply },
+      ]);
+      // The agent edited the project: reload edits so markers, counts, and
+      // overlay lanes reflect what it did.
+      if (result.edits_changed) {
+        const edits = await getProjectEdits(projectId);
+        applyLoadedEdits(edits.edits);
+      }
+    } catch (error) {
+      console.error('Error sending chat message:', error);
+      const detail = error.response?.data?.detail;
+      setChatError(
+        detail ? `Assistant error: ${detail}` : 'Could not reach the assistant.'
+      );
+    } finally {
+      setIsChatSending(false);
     }
   };
 
@@ -673,9 +1087,13 @@ function App() {
         url: getAbsoluteAPIURL(result.output_url),
         appliedEdits: result.applied_edits,
       });
+      logActivity(
+        `Rendered "${result.filename}" with ${result.applied_edits} edits applied.`
+      );
     } catch (error) {
       console.error('Error rendering project:', error);
       setToolError('Could not render the project.');
+      logActivity('Render failed. Check the render page for details.');
     } finally {
       setIsRendering(false);
     }
@@ -709,12 +1127,20 @@ function App() {
     setEditOperations([]);
     setSavedZoomEdits([]);
     setSavedStockEdits([]);
+    setSavedDiagramEdits([]);
     setEditingPlan([]);
+    setDiagramSuggestions([]);
+    setDiagramError(null);
+    setSavingDiagramId(null);
+    setInspected(null);
+    setStockRefetch({});
     setStockDownloads({});
     setStockError(null);
     setPlanError(null);
     setToolError(null);
     setRenderResult(null);
+    setChatMessages([]);
+    setChatError(null);
     setCurrentView('editor');
     setSourceMode('choose');
   };
@@ -791,12 +1217,42 @@ function App() {
               currentTime={currentTime}
               isDirty={timelineDirty}
               isSaving={isSavingTimeline}
+              overlays={timelineOverlays}
+              selectedSegmentId={
+                inspectorSelection?.kind === 'segment' ? inspected.id : null
+              }
+              selectedOverlayId={
+                inspectorSelection?.kind === 'overlay' ? inspected.id : null
+              }
               onSeek={handleSeek}
               onSplitAtPlayhead={handleSplitAtPlayhead}
               onReorder={handleReorderSegments}
               onDeleteSegment={handleDeleteSegment}
               onReset={handleResetTimeline}
               onSave={handleSaveTimeline}
+              onAddOverlay={handleAddOverlay}
+              onUpdateOverlay={handleUpdateOverlay}
+              onDeleteOverlay={handleDeleteOverlay}
+              onSelectSegment={handleSelectSegment}
+              onSelectOverlay={handleSelectOverlay}
+            />
+
+            <InspectorPanel
+              selection={inspectorSelection}
+              segmentCount={timelineSegments.length}
+              sourceDuration={sourceDuration || 0}
+              stockStatus={
+                inspectorSelection?.kind === 'overlay'
+                  ? stockRefetch[inspectorSelection.overlay.id]
+                  : null
+              }
+              onClose={() => setInspected(null)}
+              onSeek={handleSeek}
+              onUpdateSegment={handleUpdateSegment}
+              onDeleteSegment={handleDeleteSegment}
+              onUpdateOverlay={handleUpdateOverlay}
+              onDeleteOverlay={handleDeleteOverlay}
+              onRefetchStock={handleRefetchStockFootage}
             />
 
             <div className="status-strip">
@@ -814,7 +1270,8 @@ function App() {
           </section>
 
           <aside className="side-panel">
-            <div className="panel-tabs">
+            <div className="panel-top">
+              <div className="panel-tabs">
               <button
                 type="button"
                 className={activePanel === 'tools' ? 'active' : ''}
@@ -835,6 +1292,13 @@ function App() {
                 onClick={() => setActivePanel('stock')}
               >
                 Stock Footage
+              </button>
+              <button
+                type="button"
+                className={activePanel === 'diagrams' ? 'active' : ''}
+                onClick={() => setActivePanel('diagrams')}
+              >
+                Diagrams
               </button>
               <button
                 type="button"
@@ -896,6 +1360,22 @@ function App() {
                   savedStockCount={savedStockEdits.length}
                 />
               )}
+              {activePanel === 'diagrams' && (
+                <DiagramPanel
+                  suggestions={diagramSuggestions}
+                  loading={isSuggestingDiagrams}
+                  savingId={savingDiagramId}
+                  error={diagramError}
+                  hasVideo={Boolean(fileId)}
+                  savedCount={savedDiagramEdits.length}
+                  previews={diagramPreviews}
+                  onSuggest={handleSuggestDiagrams}
+                  onAccept={handleAcceptDiagram}
+                  onDismiss={handleDismissDiagram}
+                  onRenderPreview={handleRenderDiagramPreview}
+                  onSeek={handleSeek}
+                />
+              )}
               {activePanel === 'transcript' && (
                 <TranscriptPanel
                   words={transcriptWords}
@@ -904,7 +1384,16 @@ function App() {
                   loading={isLoadingTranscript}
                 />
               )}
+              </div>
             </div>
+
+            <ChatPanel
+              messages={chatMessages}
+              isSending={isChatSending}
+              error={chatError}
+              hasProject={Boolean(projectId)}
+              onSend={handleSendChatMessage}
+            />
           </aside>
         </div>
       )}
@@ -972,6 +1461,9 @@ function App() {
           <span>{editOperations.filter((edit) => edit.enabled !== false).length} active cuts</span>
           <span>{savedZoomEdits.filter((edit) => edit.enabled !== false).length} zoom effects</span>
           <span>{savedStockEdits.filter((edit) => edit.enabled !== false).length} stock clips</span>
+          {savedDiagramEdits.length > 0 && (
+            <span>{savedDiagramEdits.length} diagram overlays</span>
+          )}
           {hasSavedTimeline && (
             <span>custom timeline ({timelineSegments.length} segments)</span>
           )}

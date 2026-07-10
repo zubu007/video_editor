@@ -76,6 +76,12 @@ IMPORTANT - Stock Footage Requirements:
 - The search_query should be a concise, descriptive phrase (2-4 words) that captures the visual concept
 - Examples: "ocean waves sunset", "neural network visualization", "city traffic timelapse", "forest nature"
 - The search query will be used to download appropriate stock footage from Pexels API
+- Also provide a "media_type" parameter: "video" for a short clip, "image" for a still photo
+- Mix both media types across the plan (roughly half and half): use "image" for static
+  subjects (objects, places, portraits, products), "video" for motion, actions, or processes
+- B-roll must stay short to hold viewer attention: a "video" span may last at most 5 seconds
+  and an "image" span at most 3 seconds. Never exceed these limits — if the concept runs
+  longer, still end the B-roll at the limit (spans that exceed it will be cut down to it)
 
 Your response must be a valid JSON array of editing decisions. Each decision must have:
 - "start": timestamp in seconds (float)
@@ -167,6 +173,8 @@ Generate an editing plan as a JSON array. Each element should specify the start 
         """
         from backend.features.editing_plan.feature_registry import (
             AVAILABLE_FEATURES,
+            clamp_stock_footage_end,
+            normalize_stock_media_type,
             validate_feature_name,
         )
 
@@ -228,6 +236,21 @@ Generate an editing plan as a JSON array. Each element should specify the start 
                             f"Warning: Skipping insert_stock_footage at {start:.2f}s - empty search_query"
                         )
                         continue
+
+                    # Normalize the media type and enforce the attention-span
+                    # cap (5s video / 3s still image) on the span duration.
+                    media_type = normalize_stock_media_type(
+                        decision["parameters"].get("media_type")
+                    )
+                    decision["parameters"]["media_type"] = media_type
+                    clamped_end = clamp_stock_footage_end(start, end, media_type)
+                    if clamped_end < end:
+                        print(
+                            f"Warning: Trimming insert_stock_footage at {start:.2f}s "
+                            f"from {end - start:.2f}s to {clamped_end - start:.2f}s "
+                            f"({media_type} attention limit)"
+                        )
+                        end = clamped_end
 
             validated.append(
                 {

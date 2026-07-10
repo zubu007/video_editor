@@ -217,12 +217,19 @@
   margin-left: auto;
 }
 
+/* Right panel: tools/tabs in the top half, assistant chat in the bottom half. */
 .side-panel {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   background: var(--surface);
   border-left: 1px solid var(--border);
+}
+
+.panel-top {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .panel-tabs {

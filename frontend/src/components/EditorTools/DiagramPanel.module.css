@@ -43,11 +43,24 @@
   opacity: 0.55;
 }
 
-.saveActions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+.secondaryButton {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 9px 14px;
+  white-space: nowrap;
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.secondaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .savedNote {
@@ -80,19 +93,10 @@
   gap: 12px;
 }
 
-.query {
+.title {
   color: var(--text);
   font-size: 14px;
   font-weight: 600;
-}
-
-.mediaBadge {
-  color: var(--muted);
-  font-size: 11px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
-  white-space: nowrap;
 }
 
 .jumpButton {
@@ -111,37 +115,61 @@
   border-color: var(--primary);
 }
 
-.preview {
-  width: 100%;
-  border-radius: 6px;
-  overflow: hidden;
-  background: #000;
-}
-
-.video {
-  width: 100%;
-  display: block;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  background: #000;
-}
-
-.placeholder {
+.meta {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  color: var(--muted);
-  font-size: 13px;
-  text-align: center;
-  padding: 8px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.typeBadge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(245, 158, 11, 0.2);
+  border: 1px solid rgba(245, 158, 11, 0.7);
 }
 
 .timecode {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.excerpt {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  font-style: italic;
+}
+
+.reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.previewPlayer {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0f172a;
+}
+
+.previewError {
+  margin: 0;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .error {

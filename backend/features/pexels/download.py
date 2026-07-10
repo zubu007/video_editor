@@ -7,6 +7,7 @@ import os
 import random
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -67,12 +68,40 @@ def _search_videos(
         raise PexelsAPIError(f"Failed to search Pexels API: {e}")
 
 
-def _download_video(video_url: str, output_path: Path) -> None:
-    """Download a video from a given URL.
+def _search_photos(
+    search_term: str, api_key: str, per_page: int = 15
+) -> dict[str, Any]:
+    """Search for photos on Pexels API.
 
     Args:
-        video_url: The URL of the video to download.
-        output_path: The path where the video should be saved.
+        search_term: The search query for stock photos.
+        api_key: The Pexels API key.
+        per_page: Number of results to fetch (default: 15).
+
+    Returns:
+        The API response containing photo search results.
+
+    Raises:
+        PexelsAPIError: If the API request fails.
+    """
+    url = "https://api.pexels.com/v1/search"
+    headers = {"Authorization": api_key}
+    params = {"query": search_term, "per_page": per_page}
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise PexelsAPIError(f"Failed to search Pexels API: {e}")
+
+
+def _download_video(video_url: str, output_path: Path) -> None:
+    """Download a media file from a given URL.
+
+    Args:
+        video_url: The URL of the file to download.
+        output_path: The path where the file should be saved.
 
     Raises:
         PexelsAPIError: If the download fails.
@@ -87,7 +116,7 @@ def _download_video(video_url: str, output_path: Path) -> None:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.info(f"Video downloaded successfully to {output_path}")
+        logger.info(f"File downloaded successfully to {output_path}")
     except requests.exceptions.RequestException as e:
         raise PexelsAPIError(f"Failed to download video: {e}")
 
@@ -170,3 +199,80 @@ def download_stock_footage(
     _download_video(video_url, output_path)
 
     return str(output_path)
+
+
+def download_stock_photo(
+    search_term: str, output_dir: str = "downloads", size: str = "large2x"
+) -> str:
+    """Download a random stock photo from Pexels based on search term.
+
+    Args:
+        search_term: The search query for stock photos (e.g., "mountain lake").
+        output_dir: Directory where the photo will be saved (default: "downloads").
+        size: Photo size preference - "original", "large2x", "large", or
+            "medium" (default: "large2x", ~1880px wide, plenty for 1080p video).
+
+    Returns:
+        The path to the downloaded photo file.
+
+    Raises:
+        PexelsAPIError: If the API request or download fails.
+        ValueError: If no photos are found for the search term or invalid size.
+    """
+    valid_sizes = {"original", "large2x", "large", "medium"}
+    if size not in valid_sizes:
+        raise ValueError(f"Invalid size '{size}'. Must be one of: {valid_sizes}")
+
+    api_key = _get_api_key()
+    logger.info(f"Searching for photos with term: '{search_term}'")
+
+    search_results = _search_photos(search_term, api_key)
+
+    photos = search_results.get("photos", [])
+    if not photos:
+        raise ValueError(f"No photos found for search term: '{search_term}'")
+
+    selected_photo = random.choice(photos)
+    photo_id = selected_photo.get("id")
+    src = selected_photo.get("src", {})
+
+    photo_url = src.get(size) or src.get("original")
+    if not photo_url:
+        raise ValueError(f"Photo download link not found (ID: {photo_id})")
+
+    # Keep the extension the CDN serves (Pexels photos are typically .jpeg).
+    extension = Path(urlparse(photo_url).path).suffix or ".jpg"
+    output_path = (
+        Path(output_dir)
+        / f"pexels_{search_term.replace(' ', '_')}_{photo_id}{extension}"
+    )
+
+    logger.info(f"Downloading photo (ID: {photo_id}, Size: {size})")
+
+    _download_video(photo_url, output_path)
+
+    return str(output_path)
+
+
+def download_stock_media(
+    search_term: str, media_type: str = "video", output_dir: str = "downloads"
+) -> str:
+    """Download stock B-roll of the requested media type from Pexels.
+
+    Args:
+        search_term: The search query for stock media.
+        media_type: "video" for a stock clip, "image" for a still photo.
+        output_dir: Directory where the file will be saved (default: "downloads").
+
+    Returns:
+        The path to the downloaded file.
+
+    Raises:
+        PexelsAPIError: If the API request or download fails.
+        ValueError: If the media type is unknown or no results are found.
+    """
+    if media_type == "video":
+        return download_stock_footage(search_term, output_dir=output_dir)
+    if media_type == "image":
+        return download_stock_photo(search_term, output_dir=output_dir)
+    raise ValueError(f"Invalid media_type '{media_type}'. Must be 'video' or 'image'")

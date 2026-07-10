@@ -120,6 +120,39 @@ export async function generateEditingPlan(fileId, modelSize = 'base', additional
 }
 
 /**
+ * Suggest animated diagram overlays for an uploaded video's transcript
+ * @param {string} fileId - File ID
+ * @param {string} modelSize - Whisper model size
+ * @param {string} additionalContext - Additional context for AI
+ * @returns {Promise<{diagrams: Array}>}
+ */
+export async function suggestDiagrams(fileId, modelSize = 'base', additionalContext = '') {
+  const response = await apiClient.post(`/api/diagrams/suggest/${fileId}`, {
+    model_size: modelSize,
+    additional_context: additionalContext,
+  });
+
+  return response.data;
+}
+
+/**
+ * Render one diagram suggestion to a preview video (Manim, cached server-side)
+ * @param {Object} suggestion - Diagram suggestion with diagram_type, title, start, end, graph
+ * @returns {Promise<{video_url: string, filename: string, cached: boolean}>}
+ */
+export async function renderDiagramPreview(suggestion) {
+  const response = await apiClient.post('/api/diagrams/render', {
+    diagram_type: suggestion.diagram_type,
+    title: suggestion.title || '',
+    start: suggestion.start,
+    end: suggestion.end,
+    graph: suggestion.graph,
+  });
+
+  return response.data;
+}
+
+/**
  * Remove detected filler words from an uploaded video
  * @param {string} fileId - File ID
  * @param {string} modelSize - Whisper model size
@@ -230,15 +263,17 @@ export async function deleteProjectEdit(projectId, editId) {
 }
 
 /**
- * Download stock footage (B-roll) from Pexels for a search query.
+ * Download stock B-roll from Pexels for a search query.
  * @param {string} searchTerm - Search query (e.g. 'ocean waves')
- * @param {string} quality - Video quality (hd, sd, original)
- * @returns {Promise<{file_path: string, search_term: string}>}
+ * @param {string} quality - Video quality (hd, sd, original); ignored for images
+ * @param {string} mediaType - 'video' for a short clip, 'image' for a still photo
+ * @returns {Promise<{file_path: string, search_term: string, media_type: string}>}
  */
-export async function downloadStockFootage(searchTerm, quality = 'hd') {
+export async function downloadStockFootage(searchTerm, quality = 'hd', mediaType = 'video') {
   const formData = new FormData();
   formData.append('search_term', searchTerm);
   formData.append('quality', quality);
+  formData.append('media_type', mediaType);
   const response = await apiClient.post('/api/stock-footage/download', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
@@ -377,6 +412,24 @@ export async function importYouTubeVideo(
     };
     poll();
   });
+}
+
+/**
+ * Ask the project assistant a question about the current project.
+ * @param {string} projectId - Project ID
+ * @param {Array<{role: string, content: string}>} messages - Conversation history
+ *   (user/assistant turns, oldest first, ending with the new user message)
+ * @param {{ transcript?: string, activityLog?: string[] }} [context] - Project context:
+ *   plain-text transcript and recent editor activity lines
+ * @returns {Promise<{reply: string}>}
+ */
+export async function sendProjectChat(projectId, messages, { transcript = '', activityLog = [] } = {}) {
+  const response = await apiClient.post(`/api/projects/${projectId}/chat`, {
+    messages,
+    transcript,
+    activity_log: activityLog,
+  });
+  return response.data;
 }
 
 /**

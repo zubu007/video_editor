@@ -40,6 +40,24 @@ def _clean_label(value: Any, max_length: int = MAX_LABEL_LENGTH) -> str:
     return text
 
 
+def _parse_reveal_at(value: Any) -> float | None:
+    """Parses a node's optional reveal offset (seconds from segment start).
+
+    Args:
+        value: Raw value from the LLM.
+
+    Returns:
+        float | None: A non-negative offset, or None when missing/unusable.
+    """
+    if value is None:
+        return None
+    try:
+        offset = float(value)
+    except (TypeError, ValueError):
+        return None
+    return offset if offset >= 0 else None
+
+
 def validate_graph(graph: dict) -> dict:
     """Validates and normalizes a raw graph spec from the LLM.
 
@@ -76,7 +94,11 @@ def validate_graph(graph: dict) -> dict:
         if not node_id or not label or node_id in seen_ids:
             continue
         seen_ids.add(node_id)
-        nodes.append({"id": node_id, "label": label})
+        node = {"id": node_id, "label": label}
+        reveal_at = _parse_reveal_at(raw.get("reveal_at"))
+        if reveal_at is not None:
+            node["reveal_at"] = reveal_at
+        nodes.append(node)
 
     if len(nodes) < MIN_NODES:
         raise ValueError(f"graph needs at least {MIN_NODES} valid nodes")
@@ -155,6 +177,13 @@ def validate_suggestion(suggestion: dict, total_duration: float) -> dict:
         diagram_type = DEFAULT_DIAGRAM_TYPE
 
     graph = validate_graph(suggestion.get("graph") or {})
+
+    # Reveal offsets are relative to the segment start; keep them inside the
+    # segment (leaving a beat at the end so the last node is visible).
+    duration = end - start
+    for node in graph["nodes"]:
+        if "reveal_at" in node:
+            node["reveal_at"] = min(node["reveal_at"], max(0.0, duration - 1.0))
 
     return {
         "start": start,

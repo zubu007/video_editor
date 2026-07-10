@@ -137,6 +137,44 @@ class TestVideoCutter(unittest.TestCase):
         source = rendered.get_frame(1.0)
         self.assertLess(int(source.mean()), 40)
 
+    def test_render_with_still_image_overlays_broll(self):
+        original = VideoFileClip(str(self.video_path))
+        original_duration = original.duration
+        original_size = (original.w, original.h)
+
+        image_path = Path(self.temp_dir.name) / "stock_red.png"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-f", "lavfi",
+                "-i", "color=c=red:s=640x360",
+                "-frames:v", "1",
+                str(image_path),
+            ],
+            check=True,
+        )
+
+        # Hold the (red) still image over a span of the (black) source.
+        render_with_edits(
+            str(self.video_path),
+            [],
+            [],
+            str(self.output_path),
+            [{"start": 3, "end": 6, "footage_path": str(image_path)}],
+        )
+
+        self.assertTrue(self.output_path.exists())
+        rendered = VideoFileClip(str(self.output_path))
+        # A still overlay must not change the timeline or the frame size.
+        self.assertAlmostEqual(rendered.duration, original_duration, delta=0.5)
+        self.assertEqual((rendered.w, rendered.h), original_size)
+        # The overlaid span should show the red image, not the black source.
+        overlaid = rendered.get_frame(4.5)
+        self.assertGreater(int(overlaid[..., 0].mean()), 100)
+        # Outside the overlay the source stays black.
+        source = rendered.get_frame(1.0)
+        self.assertLess(int(source.mean()), 40)
+
     def test_render_timeline_reorders_segments(self):
         red = Path(self.temp_dir.name) / "red.mp4"
         blue = Path(self.temp_dir.name) / "blue.mp4"

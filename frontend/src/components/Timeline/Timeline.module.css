@@ -80,6 +80,179 @@
   cursor: not-allowed;
 }
 
+.body {
+  display: flex;
+  gap: 8px;
+}
+
+.gutter {
+  display: flex;
+  flex-direction: column;
+  width: 92px;
+  flex-shrink: 0;
+}
+
+.gutterRuler {
+  height: 18px;
+}
+
+.gutterLane {
+  height: 26px;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.gutterVideo {
+  height: 64px;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.addButton {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.addButton:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.addButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.lanes {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.overlayLane {
+  position: relative;
+  height: 26px;
+  margin-top: 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.overlayClip {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  min-width: 6px;
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+  box-sizing: border-box;
+  cursor: grab;
+  touch-action: none;
+}
+
+.overlayClip:active {
+  cursor: grabbing;
+}
+
+.zoomClip {
+  background: rgba(139, 92, 246, 0.35);
+  border-color: rgba(139, 92, 246, 0.7);
+}
+
+.stockClip {
+  background: rgba(16, 185, 129, 0.35);
+  border-color: rgba(16, 185, 129, 0.7);
+}
+
+.diagramClip {
+  background: rgba(245, 158, 11, 0.35);
+  border-color: rgba(245, 158, 11, 0.7);
+}
+
+.clipSelected {
+  box-shadow: 0 0 0 1px var(--primary);
+  border-color: var(--primary);
+}
+
+.clipDisabled {
+  opacity: 0.45;
+}
+
+.clipLabel {
+  font-size: 10px;
+  color: var(--text);
+  padding: 0 6px 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.trimHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.trimStart {
+  left: 0;
+  border-left: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+.trimEnd {
+  right: 0;
+  border-right: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+.clipDelete {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.clipDelete:hover {
+  background: #dc2626;
+}
+
 .ruler {
   position: relative;
   height: 18px;
@@ -108,6 +281,7 @@
   position: relative;
   display: flex;
   height: 64px;
+  margin-top: 6px;
   border-radius: 4px;
   overflow: hidden;
   background: var(--surface-2);

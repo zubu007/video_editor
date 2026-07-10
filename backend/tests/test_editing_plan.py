@@ -286,6 +286,90 @@ class TestLLMClient(unittest.TestCase):
         validated = llm._validate_editing_plan(invalid_stock_footage_2, transcript)
         self.assertEqual(len(validated), 0)
 
+    def test_validate_stock_footage_media_type_and_duration(self):
+        """Test media_type normalization and the attention-span duration caps."""
+        from backend.features.editing_plan.llm_client import EditingPlanLLM
+
+        llm = EditingPlanLLM(api_key="test_key")
+
+        transcript = [{"start": 0.0, "end": 60.0, "text": "Test about nature"}]
+
+        plan = [
+            # Video B-roll over the 5s cap -> trimmed to 5s.
+            {
+                "start": 0.0,
+                "end": 12.0,
+                "feature": "insert_stock_footage",
+                "parameters": {"search_query": "ocean waves", "media_type": "video"},
+            },
+            # Still image over the 3s cap -> trimmed to 3s.
+            {
+                "start": 20.0,
+                "end": 30.0,
+                "feature": "insert_stock_footage",
+                "parameters": {"search_query": "mountain lake", "media_type": "image"},
+            },
+            # No media_type -> defaults to video; short span stays untouched.
+            {
+                "start": 40.0,
+                "end": 42.0,
+                "feature": "insert_stock_footage",
+                "parameters": {"search_query": "city street"},
+            },
+            # Unknown media_type -> falls back to video.
+            {
+                "start": 50.0,
+                "end": 51.0,
+                "feature": "insert_stock_footage",
+                "parameters": {"search_query": "forest", "media_type": "gif"},
+            },
+        ]
+
+        validated = llm._validate_editing_plan(plan, transcript)
+        self.assertEqual(len(validated), 4)
+
+        self.assertEqual(validated[0]["parameters"]["media_type"], "video")
+        self.assertAlmostEqual(validated[0]["end"], 5.0)
+
+        self.assertEqual(validated[1]["parameters"]["media_type"], "image")
+        self.assertAlmostEqual(validated[1]["end"], 23.0)
+
+        self.assertEqual(validated[2]["parameters"]["media_type"], "video")
+        self.assertAlmostEqual(validated[2]["end"], 42.0)
+
+        self.assertEqual(validated[3]["parameters"]["media_type"], "video")
+        self.assertAlmostEqual(validated[3]["end"], 51.0)
+
+
+class TestStockMediaLimits(unittest.TestCase):
+    """Tests for the attention-span helpers in the feature registry."""
+
+    def test_clamp_stock_footage_end(self):
+        from backend.features.editing_plan.feature_registry import (
+            STOCK_MEDIA_MAX_SECONDS,
+            clamp_stock_footage_end,
+        )
+
+        self.assertEqual(STOCK_MEDIA_MAX_SECONDS["video"], 5.0)
+        self.assertEqual(STOCK_MEDIA_MAX_SECONDS["image"], 3.0)
+
+        self.assertAlmostEqual(clamp_stock_footage_end(10.0, 30.0, "video"), 15.0)
+        self.assertAlmostEqual(clamp_stock_footage_end(10.0, 30.0, "image"), 13.0)
+        # A span within the limit is untouched.
+        self.assertAlmostEqual(clamp_stock_footage_end(10.0, 12.0, "video"), 12.0)
+        # Unknown media types clamp with the default (video) limit.
+        self.assertAlmostEqual(clamp_stock_footage_end(0.0, 30.0, "hologram"), 5.0)
+
+    def test_normalize_stock_media_type(self):
+        from backend.features.editing_plan.feature_registry import (
+            normalize_stock_media_type,
+        )
+
+        self.assertEqual(normalize_stock_media_type("image"), "image")
+        self.assertEqual(normalize_stock_media_type(" Video "), "video")
+        self.assertEqual(normalize_stock_media_type(None), "video")
+        self.assertEqual(normalize_stock_media_type("gif"), "video")
+
 
 if __name__ == "__main__":
     unittest.main()

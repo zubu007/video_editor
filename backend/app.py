@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
+import re
 import shutil
 import subprocess
 import uuid
@@ -46,10 +48,25 @@ from backend.features.youtube.jobs import (
     get_job as get_download_job,
     run_download_job,
 )
+from backend.features.assistant.chat import (
+    build_project_context,
+    generate_chat_reply,
+)
+from backend.features.assistant.tools import ToolContext
 from backend.features.diagram.detector import suggest_diagrams
+from backend.features.diagram.renderer import get_or_render_overlay
+from backend.features.diagram.schema import validate_graph
+from backend.features.editing_plan.feature_registry import (
+    clamp_stock_footage_end,
+    normalize_stock_media_type,
+)
 from backend.features.editing_plan.generator import generate_editing_plan
 from backend.features.filler_words.detect import detect_filler_words
-from backend.features.pexels.download import PexelsAPIError, download_stock_footage
+from backend.features.pexels.download import (
+    PexelsAPIError,
+    download_stock_footage,
+    download_stock_media,
+)
 from backend.features.system.gpu import detect_gpus, detect_tool_cuda
 from backend.features.transcript.extract import (
     extract_transcript_as_segments,
@@ -64,6 +81,7 @@ from backend.features.project_io import (
 )
 from backend.features.project_io.import_ import ProjectFileError
 from backend.features.video_cutter.cut import (
+    IMAGE_EXTENSIONS,
     cut_filler_words,
     render_timeline,
     render_with_edits,
@@ -130,7 +148,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 # Edit operation types that can be persisted and rendered for a project.
-SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage"}
+# "diagram" overlays are rendered with Manim (transparent .mov) and composited
+# over the spans they cover at project render time.
+SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage", "diagram"}
 
 # Timeline segments are stored as EditOperation rows of this type, ordered by
 # details["position"]. They are managed only through the /timeline endpoints,
@@ -216,6 +236,10 @@ class DiagramNode(BaseModel):
 
     id: str = Field(..., description="Unique node id within the graph")
     label: str = Field(..., description="Short on-screen label")
+    reveal_at: Optional[float] = Field(
+        None,
+        description="When the node animates in, in seconds from the segment start",
+    )
 
 
 class DiagramEdge(BaseModel):
@@ -258,11 +282,36 @@ class DiagramSuggestResponse(BaseModel):
     diagrams: list[DiagramSuggestion] = []
 
 
+class DiagramRenderRequest(BaseModel):
+    """Request model for rendering one diagram spec to a preview video."""
+
+    diagram_type: str = Field(
+        "flowchart", description="One of: flowchart, timeline, comparison, cycle"
+    )
+    title: str = Field("", description="Short on-screen title")
+    start: float = Field(..., description="Segment start in seconds")
+    end: float = Field(..., description="Segment end in seconds")
+    graph: dict = Field(
+        ..., description="Graph spec with nodes, edges and reveal_order"
+    )
+
+
+class DiagramRenderResponse(BaseModel):
+    """Response model for a rendered diagram preview."""
+
+    video_url: str = Field(..., description="URL of the rendered preview video")
+    filename: str = Field(..., description="Rendered preview filename")
+    cached: bool = Field(False, description="Whether the preview came from cache")
+
+
 class StockFootageResponse(BaseModel):
     """Response model for stock footage download."""
 
-    file_path: str = Field(..., description="Path to downloaded video file")
+    file_path: str = Field(..., description="Path to downloaded media file")
     search_term: str = Field(..., description="Search term used")
+    media_type: str = Field(
+        "video", description="Downloaded media type ('video' or 'image')"
+    )
 
 
 class VideoUploadResponse(BaseModel):
@@ -609,6 +658,55 @@ class DiagramSuggestRequest(BaseModel):
     )
 
 
+class ChatMessage(BaseModel):
+    """One message in the project assistant conversation."""
+
+    role: str = Field(..., description="Message role: 'user' or 'assistant'")
+    content: str = Field(..., description="Message text")
+
+
+class ProjectChatRequest(BaseModel):
+    """Request model for the project assistant chat."""
+
+    messages: list[ChatMessage] = Field(
+        ...,
+        description="Conversation history, oldest first, ending with the user message",
+    )
+    transcript: str = Field(
+        "", description="Plain-text transcript of the source video (optional)"
+    )
+    activity_log: list[str] = Field(
+        default_factory=list,
+        description="Recent editor activity lines shown in the chat (oldest first)",
+    )
+    api_key: Optional[str] = Field(None, description="Groq API key")
+    llm_model: str = Field(
+        "llama-3.3-70b-versatile", description="Groq LLM model to use"
+    )
+
+
+class ChatActionResponse(BaseModel):
+    """One tool call the assistant executed while answering."""
+
+    tool: str = Field(..., description="Name of the tool that ran")
+    summary: str = Field(..., description="Human-readable outcome")
+    ok: bool = Field(..., description="Whether the tool call succeeded")
+
+
+class ProjectChatResponse(BaseModel):
+    """Response model for the project assistant chat."""
+
+    reply: str = Field(..., description="Assistant reply text")
+    actions: list[ChatActionResponse] = Field(
+        default_factory=list,
+        description="Tool calls the assistant executed, in order",
+    )
+    edits_changed: bool = Field(
+        False,
+        description="True when the assistant changed the project's saved edits",
+    )
+
+
 class WaveformResponse(BaseModel):
     """Response model for waveform data."""
 
@@ -703,6 +801,217 @@ def remux_video_in_place(video_path: Path) -> bool:
     return True
 
 
+# Relative gap between declared and measured frame rate above which a video is
+# treated as variable frame rate. Container quirks (29.97 declared vs 30
+# measured) stay well below it; MediaRecorder screen captures (30 declared vs
+# ~16 measured) far exceed it.
+VFR_MISMATCH_TOLERANCE = 0.10
+
+_STREAM_RATE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)(k?)\s*(fps|tbr)\b")
+
+
+def parse_stream_frame_rates(ffmpeg_output: str) -> tuple[float | None, float | None]:
+    """Parse frame rates from ffmpeg's stream-info output.
+
+    ffmpeg's ``-i`` banner reports two rates for a video stream, e.g.
+    ``16.57 fps, 30 tbr``: ``fps`` is the measured average frame rate and
+    ``tbr`` the declared (container) rate. On a constant-frame-rate file they
+    match; on variable-frame-rate output (browser ``MediaRecorder``) they
+    diverge.
+
+    Args:
+        ffmpeg_output (str): stderr text from an ``ffmpeg -i`` invocation.
+
+    Returns:
+        ``(average_fps, declared_fps)``, either value ``None`` when absent.
+    """
+    average_fps: float | None = None
+    declared_fps: float | None = None
+    for value, kilo, label in _STREAM_RATE_PATTERN.findall(ffmpeg_output):
+        rate = float(value) * (1000.0 if kilo else 1.0)
+        if label == "fps" and average_fps is None:
+            average_fps = rate
+        elif label == "tbr" and declared_fps is None:
+            declared_fps = rate
+    return average_fps, declared_fps
+
+
+_COPY_STATS_PATTERN = re.compile(r"frame=\s*(\d+).*?time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def parse_copy_stats(ffmpeg_output: str) -> tuple[int | None, float | None]:
+    """Parse ``(frame_count, stream_seconds)`` from an ffmpeg progress line.
+
+    A stream-copy pass ends with a progress line such as
+    ``frame= 1529 ... time=00:01:32.63 ...``; the last such line holds the
+    stream's total packet count and demuxed duration.
+    """
+    matches = _COPY_STATS_PATTERN.findall(ffmpeg_output)
+    if not matches:
+        return None, None
+    frames, hours, minutes, seconds = matches[-1]
+    total_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return int(frames), total_seconds
+
+
+def probe_frame_rates(video_path: Path) -> tuple[float | None, float | None]:
+    """Probe a video's measured and declared frame rates via ffmpeg.
+
+    The declared rate comes from the stream banner (``tbr``, falling back to
+    the banner ``fps``). The measured rate is computed by counting the video
+    stream's packets in a stream-copy pass (no decode, near-instant): the
+    banner ``fps`` alone cannot be trusted, because Matroska/WebM — the
+    container browsers record into — echoes the declared rate even for
+    variable-frame-rate content.
+
+    Returns:
+        ``(average_fps, declared_fps)``; either value ``None`` when probing
+        fails.
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:v:0",
+                "-c",
+                "copy",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Frame-rate probe failed for %s: %s", video_path, e)
+        return None, None
+
+    output = result.stderr or ""
+    banner_fps, declared_fps = parse_stream_frame_rates(output)
+    if declared_fps is None:
+        declared_fps = banner_fps
+
+    average_fps = banner_fps
+    frames, seconds = parse_copy_stats(output)
+    if frames and seconds and seconds > 0.1:
+        average_fps = frames / seconds
+    return average_fps, declared_fps
+
+
+def is_variable_frame_rate(
+    average_fps: float | None, declared_fps: float | None
+) -> bool:
+    """Return True when measured and declared frame rates diverge enough."""
+    if not average_fps or not declared_fps:
+        return False
+    return abs(declared_fps - average_fps) / declared_fps > VFR_MISMATCH_TOLERANCE
+
+
+def target_constant_fps(declared_fps: float | None) -> float:
+    """Pick the constant frame rate to normalize a VFR video to."""
+    if declared_fps and 5.0 <= declared_fps <= 120.0:
+        return declared_fps
+    return 30.0
+
+
+def normalize_frame_rate(video_path: Path, target_fps: float) -> Path | None:
+    """Re-encode a video to a constant frame rate.
+
+    MoviePy assumes constant frame spacing when it maps timestamps to frame
+    indices, so variable-frame-rate sources drift out of sync with their audio
+    during rendering. This re-encodes the video stream onto a uniform
+    ``target_fps`` grid (H.264 in an mp4 container, audio re-encoded to AAC)
+    and replaces the original file. Because the output container is always
+    mp4, a non-mp4 source (e.g. ``.webm``) is replaced by its ``.mp4``
+    sibling and the original deleted.
+
+    Args:
+        video_path (Path): Video to normalize in place.
+        target_fps (float): Constant frame rate for the output.
+
+    Returns:
+        Path of the normalized file, or ``None`` if the re-encode failed
+        (the original file is left untouched).
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    encode_path = video_path.with_name(f"{video_path.stem}.cfr.mp4")
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        # Even dimensions are required by yuv420p; window captures can be odd.
+        "-vf",
+        f"fps={target_fps:g},scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(encode_path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Frame-rate normalization failed for %s: %s", video_path, e)
+        encode_path.unlink(missing_ok=True)
+        return None
+
+    if result.returncode != 0 or not encode_path.exists():
+        logger.warning(
+            "Frame-rate normalization failed for %s: %s",
+            video_path,
+            (result.stderr or "")[-500:],
+        )
+        encode_path.unlink(missing_ok=True)
+        return None
+
+    final_path = video_path.with_suffix(".mp4")
+    if final_path != video_path:
+        video_path.unlink(missing_ok=True)
+    encode_path.replace(final_path)
+    return final_path
+
+
+def ensure_constant_frame_rate(video_path: Path) -> Path:
+    """Normalize a video to constant frame rate when it is detected as VFR.
+
+    Returns:
+        The path to use from here on: the normalized file when a re-encode
+        happened (its extension may differ from the input), otherwise the
+        original path.
+    """
+    average_fps, declared_fps = probe_frame_rates(video_path)
+    if not is_variable_frame_rate(average_fps, declared_fps):
+        return video_path
+
+    target = target_constant_fps(declared_fps)
+    logger.info(
+        "VFR source %s (%.2f fps measured vs %.2f declared); normalizing to %g fps",
+        video_path.name,
+        average_fps,
+        declared_fps,
+        target,
+    )
+    normalized = normalize_frame_rate(video_path, target)
+    return normalized or video_path
+
+
 def file_response_for_video(
     video_path: Path, filename: str | None = None
 ) -> FileResponse:
@@ -788,6 +1097,14 @@ async def upload_video(
             )
             if remux_video_in_place(video_path):
                 duration = get_video_duration(video_path)
+
+        # Browser MediaRecorder captures are variable frame rate, which makes
+        # MoviePy renders drift out of A/V sync; normalize before anything
+        # downstream (transcription, waveform, render) reads the file.
+        normalized_path = ensure_constant_frame_rate(video_path)
+        if normalized_path != video_path:
+            video_path = normalized_path
+            duration = get_video_duration(video_path)
 
         file_size = video_path.stat().st_size
         file_url = f"/api/video/{file_id}"
@@ -1183,21 +1500,30 @@ async def render_project(
     ]
 
     # Resolve each stock-footage edit's search query to a downloaded clip,
-    # caching downloads per query so repeated queries hit Pexels once. A failed
-    # download is skipped (logged) rather than failing the whole render.
+    # caching downloads per (media type, query) so repeated queries hit Pexels
+    # once. A failed download is skipped (logged) rather than failing the whole
+    # render. Every span is cut down to its attention-span limit (5s for video
+    # B-roll, 3s for a still image) regardless of how long the edit is.
     stock_footage_ranges: list[dict[str, Any]] = []
-    footage_by_query: dict[str, str] = {}
+    footage_by_query: dict[tuple[str, str], str] = {}
     for edit in edits:
         if edit.type != "insert_stock_footage":
             continue
         details = edit.details or {}
+        saved_path = details.get("footage_path")
+        media_type = details.get("media_type")
+        if not media_type and saved_path:
+            # Older edits saved before media_type existed: infer from the file.
+            suffix = Path(saved_path).suffix.lower()
+            media_type = "image" if suffix in IMAGE_EXTENSIONS else "video"
+        media_type = normalize_stock_media_type(media_type)
+        end = clamp_stock_footage_end(edit.start, edit.end, media_type)
 
         # Prefer a clip already downloaded for this edit (e.g. previewed in the
         # Stock Footage tab) so the render matches what the user reviewed.
-        saved_path = details.get("footage_path")
         if saved_path and Path(saved_path).exists():
             stock_footage_ranges.append(
-                {"start": edit.start, "end": edit.end, "footage_path": saved_path}
+                {"start": edit.start, "end": end, "footage_path": saved_path}
             )
             continue
 
@@ -1206,9 +1532,10 @@ async def render_project(
             logger.warning("Skipping stock footage edit %s: no search_query", edit.id)
             continue
         try:
-            if search_query not in footage_by_query:
-                footage_by_query[search_query] = download_stock_footage(
-                    search_query, output_dir=str(OUTPUT_DIR)
+            cache_key = (media_type, search_query)
+            if cache_key not in footage_by_query:
+                footage_by_query[cache_key] = download_stock_media(
+                    search_query, media_type=media_type, output_dir=str(OUTPUT_DIR)
                 )
         except (ValueError, PexelsAPIError) as e:
             logger.warning("Skipping stock footage edit %s: %s", edit.id, e)
@@ -1216,9 +1543,37 @@ async def render_project(
         stock_footage_ranges.append(
             {
                 "start": edit.start,
-                "end": edit.end,
-                "footage_path": footage_by_query[search_query],
+                "end": end,
+                "footage_path": footage_by_query[cache_key],
             }
+        )
+
+    # Render each diagram edit's graph spec to a transparent overlay video
+    # (cached by spec hash, so unchanged diagrams render once). A failed or
+    # invalid diagram is skipped (logged) rather than failing the whole render.
+    diagram_ranges: list[dict[str, Any]] = []
+    for edit in edits:
+        if edit.type != "diagram":
+            continue
+        details = edit.details or {}
+        try:
+            spec = _diagram_spec(
+                diagram_type=details.get("diagram_type", "flowchart"),
+                title=details.get("title", ""),
+                duration=edit.end - edit.start,
+                graph=details.get("graph") or {},
+            )
+            overlay_path, _ = get_or_render_overlay(
+                spec,
+                OUTPUT_DIR / "diagram_overlays",
+                transparent=True,
+                quality="medium",
+            )
+        except (ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+            logger.warning("Skipping diagram edit %s: %s", edit.id, e)
+            continue
+        diagram_ranges.append(
+            {"start": edit.start, "end": edit.end, "overlay_path": str(overlay_path)}
         )
 
     # A saved timeline (ordered, possibly rearranged segments) takes over as
@@ -1240,6 +1595,7 @@ async def render_project(
                 cut_ranges,
                 zoom_ranges,
                 stock_footage_ranges,
+                diagram_ranges,
             )
         else:
             render_with_edits(
@@ -1248,6 +1604,7 @@ async def render_project(
                 zoom_ranges,
                 str(output_path),
                 stock_footage_ranges,
+                diagram_ranges,
             )
     except Exception as e:
         logger.error(f"Error rendering project: {e}")
@@ -1259,6 +1616,7 @@ async def render_project(
         applied_edits=len(cut_ranges)
         + len(zoom_ranges)
         + len(stock_footage_ranges)
+        + len(diagram_ranges)
         + len(timeline_rows),
     )
 
@@ -2113,6 +2471,76 @@ async def generate_editing_plan_by_id(
 # ============================================================================
 
 
+def _diagram_spec(diagram_type: str, title: str, duration: float, graph: dict) -> dict:
+    """Build a validated, render-ready diagram spec.
+
+    Args:
+        diagram_type: One of the supported diagram types.
+        title: Short on-screen title.
+        duration: Overlay duration in seconds (the edit's end - start).
+        graph: Raw graph dict (nodes/edges/reveal_order).
+
+    Returns:
+        dict: Spec consumed by the Manim scene template.
+
+    Raises:
+        ValueError: If the duration is unusable or the graph fails validation.
+    """
+    if duration <= 0:
+        raise ValueError("diagram duration must be positive")
+    validated = validate_graph(graph)
+    # Reveal offsets are relative to the segment start; keep them inside the
+    # segment (leaving a beat at the end so the last node is visible).
+    for node in validated["nodes"]:
+        if "reveal_at" in node:
+            node["reveal_at"] = min(node["reveal_at"], max(0.0, duration - 1.0))
+    return {
+        "diagram_type": diagram_type,
+        "title": title or "",
+        "duration": duration,
+        "graph": validated,
+    }
+
+
+@app.post("/api/diagrams/render", response_model=DiagramRenderResponse)
+def render_diagram_preview(request: DiagramRenderRequest):
+    """Render one diagram spec to a browser-playable preview video.
+
+    Uses Manim in a subprocess to produce a low-quality .mp4 on a dark
+    background (the final project render uses a transparent overlay instead).
+    Results are cached by spec hash, so re-rendering an unchanged diagram is
+    instant. Runs synchronously in FastAPI's threadpool — a small diagram
+    takes on the order of seconds to render.
+    """
+    try:
+        spec = _diagram_spec(
+            diagram_type=request.diagram_type,
+            title=request.title,
+            duration=request.end - request.start,
+            graph=request.graph,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        # Previews live directly in OUTPUT_DIR so the existing
+        # /api/renders/{filename} route can serve them.
+        output_path, cached = get_or_render_overlay(
+            spec, OUTPUT_DIR, transparent=False, quality="low"
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Diagram render timed out")
+    except RuntimeError as e:
+        logger.error(f"Error rendering diagram preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return DiagramRenderResponse(
+        video_url=f"/api/renders/{output_path.name}",
+        filename=output_path.name,
+        cached=cached,
+    )
+
+
 @app.post("/api/diagrams/suggest/{file_id}", response_model=DiagramSuggestResponse)
 async def suggest_diagrams_by_id(
     file_id: str,
@@ -2152,6 +2580,146 @@ async def suggest_diagrams_by_id(
 
 
 # ============================================================================
+# Project Assistant Chat Endpoints
+# ============================================================================
+
+
+def _describe_edit_details(edit: EditOperation) -> str:
+    """Render the human-relevant bits of an edit's details for the LLM."""
+    details = edit.details or {}
+    parts = []
+    if edit.type == "zoom" and details.get("zoom_level"):
+        parts.append(f"zoom level {details['zoom_level']}")
+    if edit.type == "insert_stock_footage":
+        if details.get("search_query"):
+            parts.append(f"query '{details['search_query']}'")
+        if details.get("media_type") == "image":
+            parts.append("still image")
+    if edit.type == "diagram":
+        if details.get("diagram_type"):
+            parts.append(details["diagram_type"])
+        if details.get("title"):
+            parts.append(f"'{details['title']}'")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _project_chat_summary(session: Session, project: Project) -> str:
+    """Build a text description of a project's media, edits, and timeline."""
+    lines = [f"Project: {project.name} (id {project.id})"]
+
+    assets = session.exec(
+        select(MediaAsset).where(MediaAsset.project_id == project.id)
+    ).all()
+    if assets:
+        lines.append("Source media:")
+        for asset in assets:
+            duration = (
+                f"{asset.duration:.1f}s"
+                if asset.duration is not None
+                else "unknown duration"
+            )
+            lines.append(f"- {asset.filename} ({duration})")
+    else:
+        lines.append("Source media: none uploaded.")
+
+    edits = session.exec(
+        select(EditOperation)
+        .where(EditOperation.project_id == project.id)
+        .where(EditOperation.type != TIMELINE_EDIT_TYPE)
+        .order_by(EditOperation.start)
+    ).all()
+    if edits:
+        lines.append(f"Saved edit operations ({len(edits)}):")
+        for edit in edits:
+            state = "enabled" if edit.enabled else "disabled"
+            lines.append(
+                f"- [id {edit.id}] {edit.type} {edit.start:.1f}s-{edit.end:.1f}s,"
+                f" {state}, from {edit.source}{_describe_edit_details(edit)}"
+            )
+    else:
+        lines.append("Saved edit operations: none yet.")
+
+    timeline_rows = _timeline_segment_rows(session, project.id)
+    if timeline_rows:
+        ranges = ", ".join(f"{row.start:.1f}s-{row.end:.1f}s" for row in timeline_rows)
+        lines.append(
+            f"Custom timeline: {len(timeline_rows)} segments in playback order: {ranges}."
+        )
+    else:
+        lines.append("Custom timeline: none saved (video plays in original order).")
+
+    return "\n".join(lines)
+
+
+@app.post("/api/projects/{project_id}/chat", response_model=ProjectChatResponse)
+async def project_chat(
+    project_id: str,
+    request: ProjectChatRequest,
+    session: Session = Depends(get_session),
+):
+    """Answer a chat message about the current project, acting on it if asked.
+
+    Builds a description of the project's media, saved edits, and timeline from
+    the database, combines it with the transcript and recent editor activity
+    sent by the client, and runs the assistant agent. The agent may invoke
+    tools (add/update/delete edits, silence detection) before replying; the
+    executed actions are returned so the client can log them and refresh. The
+    chat itself is not persisted.
+    """
+    project = ensure_project(session, project_id)
+
+    project_context = build_project_context(
+        project_summary=_project_chat_summary(session, project),
+        activity_log=request.activity_log,
+        transcript_text=request.transcript,
+    )
+
+    # Tool execution context: the project's primary source video, when present.
+    media_asset = session.exec(
+        select(MediaAsset)
+        .where(MediaAsset.project_id == project.id)
+        .order_by(MediaAsset.created_at)
+    ).first()
+    video_path = None
+    if media_asset is not None:
+        try:
+            video_path = find_uploaded_video(media_asset.file_id)
+        except FileNotFoundError:
+            video_path = None
+    tool_context = ToolContext(
+        session=session,
+        project=project,
+        media_asset=media_asset,
+        video_path=video_path,
+    )
+
+    try:
+        result = generate_chat_reply(
+            messages=[message.model_dump() for message in request.messages],
+            project_context=project_context,
+            tool_context=tool_context,
+            api_key=request.api_key,
+            model=request.llm_model,
+        )
+        return ProjectChatResponse(
+            reply=result.reply,
+            actions=[
+                ChatActionResponse(
+                    tool=action.tool, summary=action.summary, ok=action.ok
+                )
+                for action in result.actions
+            ],
+            edits_changed=result.edits_changed,
+        )
+    except ValueError as e:
+        logger.error(f"Invalid chat request: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error generating chat reply: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Stock Footage Endpoints
 # ============================================================================
 
@@ -2162,24 +2730,35 @@ async def download_stock_footage_endpoint(
         ..., description="Search term for stock footage (e.g., 'ocean waves')"
     ),
     quality: str = Form("hd", description="Video quality (hd, sd, or original)"),
+    media_type: str = Form(
+        "video", description="B-roll media type ('video' or 'image')"
+    ),
 ):
     """
-    Download stock footage from Pexels based on search term.
+    Download stock B-roll from Pexels based on search term.
 
-    Searches Pexels API and downloads a random matching video.
+    Searches Pexels API and downloads a random matching video clip or,
+    when media_type is 'image', a random matching still photo.
     Requires PEXELS_API_KEY environment variable.
     """
+    media_type = normalize_stock_media_type(media_type)
     try:
-        logger.info(f"Downloading stock footage for '{search_term}'")
-        file_path = download_stock_footage(
-            search_term=search_term,
-            output_dir=str(OUTPUT_DIR),
-            quality=quality,
-        )
+        logger.info(f"Downloading stock {media_type} for '{search_term}'")
+        if media_type == "image":
+            file_path = download_stock_media(
+                search_term, media_type="image", output_dir=str(OUTPUT_DIR)
+            )
+        else:
+            file_path = download_stock_footage(
+                search_term=search_term,
+                output_dir=str(OUTPUT_DIR),
+                quality=quality,
+            )
 
         return StockFootageResponse(
             file_path=file_path,
             search_term=search_term,
+            media_type=media_type,
         )
 
     except Exception as e:
@@ -2192,16 +2771,18 @@ async def get_stock_footage_file(filename: str):
     """
     Download a previously fetched stock footage file.
 
-    Returns the video file for download.
+    Returns the video or image file for download.
     """
     file_path = OUTPUT_DIR / filename
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
+    guessed_type, _ = mimetypes.guess_type(filename)
+
     return FileResponse(
         path=file_path,
-        media_type="video/mp4",
+        media_type=guessed_type or "video/mp4",
         filename=filename,
     )
 
