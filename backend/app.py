@@ -48,6 +48,7 @@ from backend.features.captions import (
     DEFAULT_STYLE as DEFAULT_CAPTION_STYLE,
     STYLE_PRESETS as CAPTION_STYLE_PRESETS,
     add_captions,
+    add_text_captions,
     output_intervals,
     remap_words,
     video_duration,
@@ -165,8 +166,16 @@ VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 # "diagram" overlays are rendered with Manim (transparent .mov) and composited
 # over the spans they cover at project render time. "captions" burns
 # shorts-style word captions over the spans it covers as a final ffmpeg pass
-# after the MoviePy render.
-SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage", "diagram", "captions"}
+# after the MoviePy render. "text_caption" burns a single hand-written note
+# that streams on with a typewriter reveal, as a further ffmpeg pass.
+SUPPORTED_EDIT_TYPES = {
+    "cut",
+    "zoom",
+    "insert_stock_footage",
+    "diagram",
+    "captions",
+    "text_caption",
+}
 
 # Timeline segments are stored as EditOperation rows of this type, ordered by
 # details["position"]. They are managed only through the /timeline endpoints,
@@ -1135,6 +1144,29 @@ def validate_captions_metadata(edit_type: str, metadata: dict | None) -> None:
         )
 
 
+# Where a manual text caption may sit on the frame.
+TEXT_CAPTION_POSITIONS = {"top", "middle", "bottom"}
+
+
+def validate_text_caption_metadata(edit_type: str, metadata: dict | None) -> None:
+    """Reject a text-caption edit with no text or an invalid position."""
+    if edit_type != "text_caption":
+        return
+    details = metadata or {}
+    if not str(details.get("text", "")).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="A text caption needs non-empty 'text'.",
+        )
+    position = details.get("position")
+    if position is not None and position not in TEXT_CAPTION_POSITIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown caption position '{position}'. "
+            f"Valid positions: {', '.join(sorted(TEXT_CAPTION_POSITIONS))}",
+        )
+
+
 def ensure_project(session: Session, project_id: str) -> Project:
     """Return a project or raise a 404 response."""
     project = get_project(session, project_id)
@@ -1398,6 +1430,7 @@ async def create_project_edits_bulk(
                 f"Supported types: {', '.join(sorted(SUPPORTED_EDIT_TYPES))}",
             )
         validate_captions_metadata(edit_request.type, edit_request.metadata)
+        validate_text_caption_metadata(edit_request.type, edit_request.metadata)
 
         edit = EditOperation(
             project_id=project_id,
@@ -1447,6 +1480,7 @@ async def update_project_edit(
         edit.enabled = request.enabled
     if request.metadata is not None:
         validate_captions_metadata(edit.type, request.metadata)
+        validate_text_caption_metadata(edit.type, request.metadata)
         edit.details = request.metadata
 
     edit.updated_at = utc_now()
@@ -1601,6 +1635,59 @@ def _burn_project_captions(
         style=details.get("style", DEFAULT_CAPTION_STYLE),
         max_words_per_line=details.get("max_words_per_line"),
     )
+    rendered_path.unlink(missing_ok=True)
+
+
+def _burn_project_text_captions(
+    source_path: Path,
+    rendered_path: Path,
+    output_path: Path,
+    text_caption_edits: list[EditOperation],
+    cut_ranges: list,
+    timeline_rows: list[EditOperation],
+) -> None:
+    """Burn hand-written streaming captions onto a rendered project video.
+
+    Each edit's ``details["text"]`` is anchored at the edit's source-time span;
+    the span is remapped onto the rendered output's timeline (mirroring cuts and
+    a saved timeline) so a note streams on at the moment it was placed. Captions
+    whose span was entirely cut away are dropped; if none survive the rendered
+    video is kept as-is.
+    """
+    segments = [{"start": row.start, "end": row.end} for row in timeline_rows]
+    intervals = output_intervals(
+        video_duration(source_path), cut_ranges, segments or None
+    )
+    # Remap each caption's span onto the output timeline by the interval holding
+    # its midpoint (mirroring remap_words), keeping the note's text and options.
+    # Done inline rather than via remap_words so a caption stays tied to its
+    # edit — remap_words drops cut spans and re-sorts, breaking that pairing.
+    captions: list[dict] = []
+    for edit in text_caption_edits:
+        details = edit.details or {}
+        text = str(details.get("text", ""))
+        if not text.strip():
+            continue
+        midpoint = (edit.start + edit.end) / 2.0
+        for interval in intervals:
+            if interval["source_start"] <= midpoint < interval["source_end"]:
+                offset = interval["output_start"] - interval["source_start"]
+                captions.append(
+                    {
+                        "start": max(edit.start, interval["source_start"]) + offset,
+                        "end": min(edit.end, interval["source_end"]) + offset,
+                        "text": text,
+                        "position": details.get("position"),
+                        "reveal_seconds": details.get("reveal_seconds"),
+                    }
+                )
+                break
+    if not captions:
+        logger.warning("All text captions were cut; rendering without them")
+        rendered_path.replace(output_path)
+        return
+
+    add_text_captions(rendered_path, captions, output_path)
     rendered_path.unlink(missing_ok=True)
 
 
@@ -1803,19 +1890,22 @@ def _execute_render(job_id: str, project_id: str, session: Session) -> None:
     )
 
     captions_edits = [edit for edit in edits if edit.type == "captions"]
+    text_caption_edits = [edit for edit in edits if edit.type == "text_caption"]
+    # Both caption kinds burn in via libass as ffmpeg passes over the MoviePy
+    # render; transcript captions first, then hand-written notes on top.
+    has_burn_pass = bool(captions_edits or text_caption_edits)
 
     output_filename = f"rendered_{project_id}_{uuid.uuid4().hex[:8]}{video_path.suffix}"
     output_path = OUTPUT_DIR / output_filename
-    # Captions burn as a separate ffmpeg pass over the MoviePy render, so with
-    # captions the MoviePy output is an intermediate file.
+    # With a burn pass to follow, the MoviePy output is an intermediate file.
     render_target = (
-        OUTPUT_DIR / f"precaption_{output_filename}" if captions_edits else output_path
+        OUTPUT_DIR / f"precaption_{output_filename}" if has_burn_pass else output_path
     )
 
     # The MoviePy encode drives the progress bar. When a caption burn pass follows,
     # reserve the top slice of the bar for it so the user still sees movement while
     # ffmpeg re-encodes with the captions layered on.
-    encode_scale = 0.9 if captions_edits else 1.0
+    encode_scale = 0.9 if has_burn_pass else 1.0
 
     def on_progress(fraction: float) -> None:
         update_render_job(job_id, progress=round(fraction * encode_scale, 4))
@@ -1841,13 +1931,33 @@ def _execute_render(job_id: str, project_id: str, session: Session) -> None:
             diagram_ranges,
             on_progress=on_progress,
         )
+
+    # Chain the burn passes: each reads the previous stage's file and the last
+    # one writes output_path (an intermediate in between when both run).
+    burn_source = render_target
     if captions_edits:
         update_render_job(job_id, progress=encode_scale)
+        caption_out = (
+            OUTPUT_DIR / f"pretext_{output_filename}"
+            if text_caption_edits
+            else output_path
+        )
         _burn_project_captions(
             video_path,
-            render_target,
-            output_path,
+            burn_source,
+            caption_out,
             captions_edits,
+            cut_ranges,
+            timeline_rows,
+        )
+        burn_source = caption_out
+    if text_caption_edits:
+        update_render_job(job_id, progress=encode_scale)
+        _burn_project_text_captions(
+            video_path,
+            burn_source,
+            output_path,
+            text_caption_edits,
             cut_ranges,
             timeline_rows,
         )
@@ -1859,6 +1969,7 @@ def _execute_render(job_id: str, project_id: str, session: Session) -> None:
         + len(diagram_ranges)
         + len(timeline_rows)
         + len(captions_edits)
+        + len(text_caption_edits)
     )
     update_render_job(
         job_id,

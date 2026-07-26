@@ -11,6 +11,10 @@ from backend.features.captions.styles import (
     CaptionStyle,
     get_style,
 )
+from backend.features.captions.text_caption import (
+    add_text_captions,
+    build_text_caption_ass,
+)
 
 __all__ = [
     "DEFAULT_STYLE",
@@ -18,7 +22,9 @@ __all__ = [
     "STYLE_PRESETS",
     "CaptionStyle",
     "add_captions",
+    "add_text_captions",
     "build_ass",
+    "build_text_caption_ass",
     "burn_captions",
     "get_style",
     "group_words",

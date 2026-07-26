@@ -1,0 +1,65 @@
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  container-type: size;
+  overflow: hidden;
+}
+
+.caption {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  display: flex;
+  justify-content: center;
+  text-align: center;
+}
+
+.caption.bottom {
+  bottom: 8%;
+}
+
+.caption.middle {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.caption.top {
+  top: 8%;
+}
+
+.text {
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0.3em 0.5em;
+  border-radius: 0.25em;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-family: 'Montserrat ExtraBold', 'Arial Black', Impact, sans-serif;
+  font-weight: 800;
+  font-size: 4.5cqh;
+  line-height: 1.25;
+  white-space: pre-wrap;
+}
+
+.caret {
+  display: inline-block;
+  width: 0.08em;
+  height: 1em;
+  margin-left: 0.06em;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: blink 0.8s steps(1) infinite;
+}
+
+@keyframes blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}

@@ -17,6 +17,9 @@ temp/outputs/*
 data/*.db
 data/*.db-*
 
+# Local test footage (multi-GB recordings, not shared)
+backend/sample_video/
+
 # Log files
 *.log
 nohup.out

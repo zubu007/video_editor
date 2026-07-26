@@ -132,6 +132,12 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   be on the timeline of the video being burned: `remap.py` (`output_intervals` + `remap_words`)
   converts source-time words to output time, mirroring the renderer's cut/timeline semantics
   exactly. Persisted as `EditOperation` rows of `type="captions"` (see Persistence).
+  `text_caption.py` is the **manual** counterpart (the "Notes" tab): hand-written notes placed
+  at the playhead that stream on with a typewriter reveal. `build_text_caption_ass` emits a
+  growing-prefix sequence of ASS events (same per-word technique, at character granularity) with
+  a readable box; `add_text_captions` burns them. Persisted as `type="text_caption"` edits whose
+  `details` carry `text`, `position` (top/middle/bottom) and optional `reveal_seconds`, and burned
+  as a further ffmpeg pass after the transcript-caption pass in the render worker.
 - `caption_removal/` — removes burned-in captions via the external VideoSubtitleRemover tool
   (see Environment → caption-removal setup). `remove.py` builds and runs the tool's CLI as an
   isolated subprocess; `jobs.py` is a thread-safe **in-memory** job registry (jobs are lost on
@@ -146,7 +152,10 @@ SQLModel over SQLite at `data/video_editor.db` (created on startup via `init_db(
 lifespan). Core tables: `Project`, `MediaAsset` (one source file, keyed by `file_id`), and
 `EditOperation` (non-destructive edit, with `enabled` flag and a JSON `details` column). Routes get
 a session via the `get_session` FastAPI dependency. The generic edit endpoints accept the types in
-`SUPPORTED_EDIT_TYPES` (`cut`, `zoom`, `insert_stock_footage`, `diagram`, `captions`). Timeline
+`SUPPORTED_EDIT_TYPES` (`cut`, `zoom`, `insert_stock_footage`, `diagram`, `captions`,
+`text_caption`). Note the render worker dispatches each type with hardcoded `edit.type == ...`
+branches rather than off `SUPPORTED_EDIT_TYPES` — adding a type means both registering it here
+*and* adding a render branch, or it silently no-ops at render. Timeline
 segments — the ordered, possibly rearranged source ranges built in the frontend's `Timeline`
 component — are stored as `EditOperation` rows of `type="timeline_segment"` (order in
 `details["position"]`) and are managed only via `GET/PUT /api/projects/{id}/timeline`. When a

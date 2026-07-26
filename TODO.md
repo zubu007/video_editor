@@ -21,18 +21,22 @@ recording to calibrate CV thresholds before implementation.
    - NEEDS: a 2-3 min sample clip that includes at least one death→respawn, plus
      the capture resolution, to tune the saturation threshold.
 
-4. **Manual streaming captions (typewriter effect)**
-   - User pauses at the playhead where they want a note, types a caption (e.g. a
-     thought or item-choice explanation), and it's placed at that time with a
-     dynamic streaming/typewriter reveal.
-   - Confirmed feasible: reuses the existing caption engine. `captions/ass_builder.py`
-     already emits per-word ASS events (streaming = word/char-granularity reveal via
-     ASS `\k` or sequential events); `VideoPlayer/CaptionOverlay` gives the live CSS
-     preview before render.
-   - Design: a SEPARATE edit type from the transcript-based "Captions" tab — a
-     manual `text_caption` overlay (custom text, placed at the paused time, own
-     reveal style). Keep it distinct so auto-captions and manual notes don't collide;
-     allows many independent captions on the timeline.
+4. **Manual streaming captions (typewriter effect)** — ✅ DONE
+   - User pauses at the playhead, types a note (e.g. a thought or item-choice
+     explanation) in the new **Notes** tab, and it's placed at that time and
+     streams on with a typewriter reveal.
+   - Implemented as a separate `text_caption` edit type (distinct from the
+     transcript "Captions" tab):
+     - Backend `features/captions/text_caption.py` — typewriter ASS builder
+       (`build_text_caption_ass`) + `add_text_captions` burn; registered in
+       `SUPPORTED_EDIT_TYPES`, validated, remapped source→output time, and burned
+       as a final ffmpeg pass in `_execute_render` (chained after transcript
+       captions).
+     - Frontend `EditorTools/TextCaptionsPanel` (add-at-playhead, edit, position,
+       toggle, delete) + live `VideoPlayer/TextCaptionOverlay` typewriter preview.
+   - Tests: `backend/tests/test_text_captions.py`.
+   - Possible follow-ups: timeline lane for notes (drag/trim), per-note reveal
+     speed control in the UI, style presets for the note box.
 
 ### Later (support-specific, after the above prove out)
 - Cut long farming/downtime stretches.

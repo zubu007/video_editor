@@ -1,11 +1,12 @@
 import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
 import VideoControls from './VideoControls';
 import CaptionOverlay from './CaptionOverlay';
+import TextCaptionOverlay from './TextCaptionOverlay';
 import useKeyboardControls from '../../hooks/useKeyboardControls';
 import useVideoPlayer from '../../hooks/useVideoPlayer';
 import styles from './VideoPlayer.module.css';
 
-const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [], onAspectRatioChange, captionPreview = null }, ref) => {
+const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [], onAspectRatioChange, captionPreview = null, textCaptions = [] }, ref) => {
   const {
     videoRef,
     wrapperRef,
@@ -84,6 +85,13 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
               words={captionPreview.words}
               style={captionPreview.style}
               wordsPerLine={captionPreview.wordsPerLine}
+              currentTime={currentTime}
+            />
+          )}
+
+          {textCaptions.length > 0 && (
+            <TextCaptionOverlay
+              captions={textCaptions}
               currentTime={currentTime}
             />
           )}

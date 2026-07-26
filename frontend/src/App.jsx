@@ -7,6 +7,7 @@ import Timeline from './components/Timeline/Timeline';
 import SilenceTool from './components/EditorTools/SilenceTool';
 import CaptionTool from './components/EditorTools/CaptionTool';
 import CaptionsPanel from './components/EditorTools/CaptionsPanel';
+import TextCaptionsPanel from './components/EditorTools/TextCaptionsPanel';
 import EditingPlanPanel from './components/EditorTools/EditingPlanPanel';
 import EditsPanel from './components/EditorTools/EditsPanel';
 import StockFootagePanel from './components/EditorTools/StockFootagePanel';
@@ -81,6 +82,11 @@ function App() {
   const [savedCaptionsEdits, setSavedCaptionsEdits] = useState([]);
   const [isSavingCaptions, setIsSavingCaptions] = useState(false);
   const [captionsError, setCaptionsError] = useState(null);
+  // Hand-written streaming captions ("Notes"): saved text_caption edits placed
+  // at the playhead, plus their save/error state.
+  const [savedTextCaptions, setSavedTextCaptions] = useState([]);
+  const [isSavingTextCaption, setIsSavingTextCaption] = useState(false);
+  const [textCaptionsError, setTextCaptionsError] = useState(null);
   const [editingPlan, setEditingPlan] = useState([]);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [planError, setPlanError] = useState(null);
@@ -177,6 +183,7 @@ function App() {
     setSavedDiagramEdits(edits.filter((edit) => edit.type === 'diagram'));
     const captionsEdits = edits.filter((edit) => edit.type === 'captions');
     setSavedCaptionsEdits(captionsEdits);
+    setSavedTextCaptions(edits.filter((edit) => edit.type === 'text_caption'));
     // Adopt the saved captions settings so the panel and live preview match.
     if (captionsEdits[0]?.metadata?.style) {
       setCaptionStyleName(captionsEdits[0].metadata.style);
@@ -213,6 +220,7 @@ function App() {
     editOperations.length > 0 ||
     timelineOverlays.length > 0 ||
     savedCaptionsEdits.length > 0 ||
+    savedTextCaptions.length > 0 ||
     hasSavedTimeline;
 
   // Live caption preview on the player: while the Captions tab is open it
@@ -300,6 +308,8 @@ function App() {
     setSavedDiagramEdits([]);
     setSavedCaptionsEdits([]);
     setCaptionsError(null);
+    setSavedTextCaptions([]);
+    setTextCaptionsError(null);
     setEditingPlan([]);
     setDiagramSuggestions([]);
     setDiagramError(null);
@@ -742,6 +752,91 @@ function App() {
     } catch (error) {
       console.error('Error deleting captions edit:', error);
       setCaptionsError('Could not remove the saved captions.');
+    }
+  };
+
+  // Default seconds a manual caption stays on screen from where it's placed.
+  const DEFAULT_TEXT_CAPTION_DURATION = 4;
+
+  // Create a manual streaming caption anchored at the current playhead time.
+  const handleAddTextCaption = async (text, { position = 'bottom' } = {}) => {
+    if (!projectId || sourceDuration === null) return;
+
+    const trimmed = text?.trim();
+    if (!trimmed) return;
+
+    const length = Math.min(DEFAULT_TEXT_CAPTION_DURATION, sourceDuration);
+    const start = Math.max(0, Math.min(currentTime, sourceDuration - length));
+
+    setIsSavingTextCaption(true);
+    setTextCaptionsError(null);
+    try {
+      await createProjectEdits(projectId, [
+        {
+          type: 'text_caption',
+          source: 'notes_tool',
+          start,
+          end: start + length,
+          enabled: true,
+          media_asset_id: mediaAssetId,
+          metadata: { text: trimmed, position },
+        },
+      ]);
+      const edits = await getProjectEdits(projectId);
+      applyLoadedEdits(edits.edits);
+      logActivity(`Added a note at ${start.toFixed(1)}s.`);
+    } catch (error) {
+      console.error('Error adding note:', error);
+      setTextCaptionsError('Could not add the note.');
+    } finally {
+      setIsSavingTextCaption(false);
+    }
+  };
+
+  const handleUpdateTextCaption = async (caption, changes) => {
+    if (!projectId) return;
+
+    // Optimistic update so inline edits feel immediate.
+    setSavedTextCaptions((captions) =>
+      captions.map((existing) =>
+        existing.id === caption.id ? { ...existing, ...changes } : existing
+      )
+    );
+    setTextCaptionsError(null);
+    try {
+      const updated = await updateProjectEdit(projectId, caption.id, changes);
+      setSavedTextCaptions((captions) =>
+        captions.map((existing) =>
+          existing.id === updated.id ? updated : existing
+        )
+      );
+    } catch (error) {
+      console.error('Error updating note:', error);
+      setTextCaptionsError('Could not update the note.');
+      try {
+        const edits = await getProjectEdits(projectId);
+        applyLoadedEdits(edits.edits);
+      } catch (reloadError) {
+        console.error('Error reloading edits:', reloadError);
+      }
+    }
+  };
+
+  const handleToggleTextCaption = (caption) =>
+    handleUpdateTextCaption(caption, { enabled: caption.enabled === false });
+
+  const handleDeleteTextCaption = async (caption) => {
+    if (!projectId) return;
+
+    setTextCaptionsError(null);
+    try {
+      await deleteProjectEdit(projectId, caption.id);
+      setSavedTextCaptions((captions) =>
+        captions.filter((existing) => existing.id !== caption.id)
+      );
+    } catch (error) {
+      console.error('Error deleting note:', error);
+      setTextCaptionsError('Could not remove the note.');
     }
   };
 
@@ -1373,6 +1468,8 @@ function App() {
     setSavedDiagramEdits([]);
     setSavedCaptionsEdits([]);
     setCaptionsError(null);
+    setSavedTextCaptions([]);
+    setTextCaptionsError(null);
     setEditingPlan([]);
     setDiagramSuggestions([]);
     setDiagramError(null);
@@ -1488,6 +1585,7 @@ function App() {
               rangeMarkers={rangeMarkers}
               onAspectRatioChange={setVideoAspectRatio}
               captionPreview={captionPreview}
+              textCaptions={savedTextCaptions}
             />
 
             <Timeline
@@ -1596,6 +1694,13 @@ function App() {
               </button>
               <button
                 type="button"
+                className={activePanel === 'notes' ? 'active' : ''}
+                onClick={() => setActivePanel('notes')}
+              >
+                Notes
+              </button>
+              <button
+                type="button"
                 className={activePanel === 'transcript' ? 'active' : ''}
                 onClick={() => setActivePanel('transcript')}
               >
@@ -1698,6 +1803,20 @@ function App() {
                   onDelete={handleDeleteCaptionsEdit}
                 />
               )}
+              {activePanel === 'notes' && (
+                <TextCaptionsPanel
+                  captions={savedTextCaptions}
+                  currentTime={currentTime}
+                  hasProject={Boolean(projectId)}
+                  saving={isSavingTextCaption}
+                  error={textCaptionsError}
+                  onAdd={handleAddTextCaption}
+                  onUpdate={handleUpdateTextCaption}
+                  onToggle={handleToggleTextCaption}
+                  onDelete={handleDeleteTextCaption}
+                  onSeek={handleSeek}
+                />
+              )}
               {activePanel === 'transcript' && (
                 <TranscriptPanel
                   words={transcriptWords}
@@ -1785,6 +1904,12 @@ function App() {
           <span>{savedStockEdits.filter((edit) => edit.enabled !== false).length} stock clips</span>
           {savedDiagramEdits.length > 0 && (
             <span>{savedDiagramEdits.length} diagram overlays</span>
+          )}
+          {savedTextCaptions.filter((edit) => edit.enabled !== false).length > 0 && (
+            <span>
+              {savedTextCaptions.filter((edit) => edit.enabled !== false).length}{' '}
+              notes
+            </span>
           )}
           {hasSavedTimeline && (
             <span>custom timeline ({timelineSegments.length} segments)</span>
