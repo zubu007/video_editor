@@ -30,9 +30,10 @@ nohup.out
 # Node (root-level safety; frontend has its own .gitignore)
 node_modules/
 
-# IDE
+# IDE / agent tooling (machine-local settings, not shared)
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 
