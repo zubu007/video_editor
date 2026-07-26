@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# Pre-commit hook: refuse to commit obvious secrets.
+#
+# Two independent checks:
+#   1. Filenames — block any `.env` / `.env.local` style file (allows `.env.example`).
+#   2. Content   — scan newly ADDED lines for well-known credential prefixes.
+#
+# Install with:  scripts/install-hooks.sh
+# Bypass once:   git commit --no-verify        (or SKIP_SECRET_SCAN=1 git commit)
+#
+# Deliberately prefix-based rather than entropy-based: high-entropy heuristics
+# false-positive constantly on lock files (uv.lock, package-lock.json) and font
+# binaries, and a hook people disable is worse than no hook.
+
+if [ -n "$SKIP_SECRET_SCAN" ]; then
+    echo "pre-commit: secret scan skipped (SKIP_SECRET_SCAN set)"
+    exit 0
+fi
+
+fail=0
+
+red() { printf '\033[31m%s\033[0m\n' "$1"; }
+
+# --- 1. Blocked filenames -------------------------------------------------
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    base=${file##*/}
+    case "$base" in
+        .env.example|.env.sample|.env.template) continue ;;
+        .env|.env.*)
+            red "BLOCKED FILE: $file"
+            echo "  Environment files hold real credentials and must stay untracked."
+            echo "  Fix: git rm --cached '$file' && echo '$base' >> .gitignore"
+            fail=1
+            ;;
+    esac
+done <<EOF
+$(git diff --cached --name-only --diff-filter=ACM)
+EOF
+
+# --- 2. Credential prefixes in added lines --------------------------------
+# One simple pattern per iteration: a single combined alternation trips the
+# regex-complexity limit in some grep implementations (ugrep) and silently errors.
+scan_patterns='
+gsk_[A-Za-z0-9]{20,}|Groq API key
+sk-ant-[A-Za-z0-9_-]{20,}|Anthropic API key
+sk-proj-[A-Za-z0-9_-]{20,}|OpenAI project key
+AKIA[0-9A-Z]{16}|AWS access key ID
+gh[pousr]_[A-Za-z0-9]{30,}|GitHub token
+github_pat_[A-Za-z0-9_]{30,}|GitHub fine-grained PAT
+AIza[0-9A-Za-z_-]{30,}|Google API key
+xox[baprs]-[A-Za-z0-9-]{10,}|Slack token
+-----BEGIN [A-Z ]*PRIVATE KEY-----|Private key block
+'
+
+added_lines=$(git diff --cached --unified=0 --diff-filter=ACM | grep '^+' | grep -v '^+++' || true)
+
+if [ -n "$added_lines" ]; then
+    # Fed by here-doc, not a pipe: a pipe would run the loop in a subshell and
+    # `fail=1` would be lost when it exits.
+    while IFS='|' read -r pattern label; do
+        [ -z "$pattern" ] && continue
+        if printf '%s\n' "$added_lines" | grep -qE "$pattern" 2>/dev/null; then
+            red "BLOCKED CONTENT: possible $label"
+            printf '%s\n' "$added_lines" | grep -nE "$pattern" 2>/dev/null | head -3 | cut -c1-140
+            echo "  Move the value into .env (gitignored) and read it via os.environ."
+            fail=1
+        fi
+    done <<EOF
+$scan_patterns
+EOF
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo ""
+    red "Commit aborted by pre-commit secret scan."
+    echo "If this is a false positive (placeholder, test fixture, docs):"
+    echo "  git commit --no-verify"
+    exit 1
+fi
+
+exit 0
