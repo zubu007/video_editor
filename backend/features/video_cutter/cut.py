@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, Optional
 
+import proglog
 from moviepy import (
     CompositeVideoClip,
     ImageClip,
@@ -13,6 +15,37 @@ from backend.features.face_detection.detect import detect_face_center
 
 # Stock B-roll files with these extensions are still images, not videos.
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+# A callback receiving render completion as a 0.0–1.0 fraction.
+ProgressCallback = Callable[[float], None]
+
+
+# The proglog bars MoviePy ticks once per written video frame ("frame_index" on
+# MoviePy 2.x, "t" on 1.x). The audio pass uses a separate "chunk" bar which we
+# deliberately ignore: it runs to completion first, so reporting it too would send
+# progress back to zero when the video pass starts.
+_VIDEO_PROGRESS_BARS = {"frame_index", "t"}
+
+
+class _RenderProgressLogger(proglog.ProgressBarLogger):
+    """proglog logger that forwards MoviePy's frame-write progress as a fraction.
+
+    Translates the video bar's index/total into a 0.0-1.0 fraction and hands it to
+    ``on_progress``, so the reported value climbs monotonically to completion.
+    """
+
+    def __init__(self, on_progress: ProgressCallback) -> None:
+        super().__init__()
+        self._on_progress = on_progress
+
+    def bars_callback(self, bar, attr, value, old_value=None) -> None:  # noqa: D401
+        if bar not in _VIDEO_PROGRESS_BARS or attr != "index":
+            return
+        total = self.bars[bar].get("total")
+        if not total:
+            return
+        fraction = min(1.0, max(0.0, value / total))
+        self._on_progress(fraction)
 
 
 def _subclip(video: VideoFileClip, start: float, end: float):
@@ -183,7 +216,7 @@ def _focus_for_span(video: VideoFileClip, start: float, end: float):
         return None
 
 
-def _interval_minus_cuts(
+def interval_minus_cuts(
     start: float, end: float, cut_ranges: list
 ) -> list[tuple[float, float]]:
     """Return the sub-intervals of ``[start, end)`` kept after removing cuts."""
@@ -205,7 +238,7 @@ def _interval_minus_cuts(
 
 def _kept_intervals(cut_ranges: list, duration: float) -> list[tuple[float, float]]:
     """Return the intervals of the source kept after removing ``cut_ranges``."""
-    return _interval_minus_cuts(0.0, duration, cut_ranges)
+    return interval_minus_cuts(0.0, duration, cut_ranges)
 
 
 def _active_range(point: float, ranges: list) -> dict | None:
@@ -269,6 +302,7 @@ def render_with_edits(
     output_path: str,
     stock_footage_ranges: list | None = None,
     diagram_ranges: list | None = None,
+    on_progress: Optional[ProgressCallback] = None,
 ) -> None:
     """Render a video by removing cuts and applying zoom/B-roll/diagram effects.
 
@@ -295,6 +329,8 @@ def render_with_edits(
         diagram_ranges (list | None): Animated diagram overlays, each
             ``{"start", "end", "overlay_path"}`` where ``overlay_path`` points
             to a rendered alpha-channel diagram video timed to the range.
+        on_progress (ProgressCallback | None): Called with the frame-write
+            progress as a 0.0–1.0 fraction while the output is encoded.
     """
     video = VideoFileClip(video_path)
     sorted_zooms = sorted(zoom_ranges, key=lambda r: r["start"])
@@ -316,16 +352,20 @@ def render_with_edits(
             )
         )
 
-    _write_concatenated(video, clips_to_keep, output_path)
+    _write_concatenated(video, clips_to_keep, output_path, on_progress)
 
 
 def _load_diagram_overlays(diagram_ranges: list) -> dict:
-    """Open each diagram overlay video once, keyed by path (with alpha)."""
+    """Open each diagram overlay video once, keyed by path.
+
+    Transparent overlays are ``.mov`` files with an alpha channel; diagrams
+    rendered on a solid background are opaque ``.mp4`` files.
+    """
     overlays: dict[str, VideoFileClip] = {}
     for r in diagram_ranges:
         path = r.get("overlay_path")
         if path and path not in overlays:
-            overlays[path] = VideoFileClip(path, has_mask=True)
+            overlays[path] = VideoFileClip(path, has_mask=path.endswith(".mov"))
     return overlays
 
 
@@ -359,19 +399,29 @@ def _effect_clips(
     return clips
 
 
-def _write_concatenated(video: VideoFileClip, clips: list, output_path: str) -> None:
-    """Concatenate ``clips`` and write the result (empty video when none)."""
+def _write_concatenated(
+    video: VideoFileClip,
+    clips: list,
+    output_path: str,
+    on_progress: Optional[ProgressCallback] = None,
+) -> None:
+    """Concatenate ``clips`` and write the result (empty video when none).
+
+    When ``on_progress`` is given, frame-write progress is reported through it as
+    a 0.0–1.0 fraction; otherwise MoviePy's default console bar is used.
+    """
+    logger = _RenderProgressLogger(on_progress) if on_progress else "bar"
     if clips:
         final_clip = concatenate_videoclips(clips)
         # Still-image overlays have no fps of their own; fall back to the source's.
         fps = getattr(final_clip, "fps", None) or video.fps
         final_clip.write_videofile(
-            output_path, fps=fps, codec="libx264", audio_codec="aac"
+            output_path, fps=fps, codec="libx264", audio_codec="aac", logger=logger
         )
     else:
         # If everything was cut, write an empty video.
         _subclip(video, 0, 0).write_videofile(
-            output_path, codec="libx264", audio_codec="aac"
+            output_path, codec="libx264", audio_codec="aac", logger=logger
         )
 
 
@@ -383,6 +433,7 @@ def render_timeline(
     zoom_ranges: list | None = None,
     stock_footage_ranges: list | None = None,
     diagram_ranges: list | None = None,
+    on_progress: Optional[ProgressCallback] = None,
 ) -> None:
     """Render ordered timeline segments, composing source-time edits.
 
@@ -404,6 +455,8 @@ def render_timeline(
             ``{"start", "end", "footage_path"}``.
         diagram_ranges (list | None): Animated diagram overlays, each
             ``{"start", "end", "overlay_path"}``.
+        on_progress (ProgressCallback | None): Called with the frame-write
+            progress as a 0.0–1.0 fraction while the output is encoded.
     """
     video = VideoFileClip(video_path)
     duration = float(video.duration)
@@ -419,7 +472,7 @@ def render_timeline(
         segment_end = min(duration, float(segment["end"]))
         if segment_end <= segment_start:
             continue
-        for interval_start, interval_end in _interval_minus_cuts(
+        for interval_start, interval_end in interval_minus_cuts(
             segment_start, segment_end, cuts
         ):
             clips.extend(
@@ -434,7 +487,7 @@ def render_timeline(
                 )
             )
 
-    _write_concatenated(video, clips, output_path)
+    _write_concatenated(video, clips, output_path, on_progress)
 
 
 def cut_filler_words(

@@ -1,6 +1,11 @@
 import { formatTime } from '../../utils/timeFormat';
 import styles from './DiagramPanel.module.css';
 
+const LAYOUT_OPTIONS = [
+  { value: 'landscape', label: 'Landscape' },
+  { value: 'portrait', label: 'Portrait' },
+];
+
 function DiagramCard({
   suggestion,
   isSaving,
@@ -8,10 +13,12 @@ function DiagramCard({
   onAccept,
   onDismiss,
   onRenderPreview,
+  onSetLayout,
   onSeek,
 }) {
   const nodeCount = suggestion.graph?.nodes?.length || 0;
   const isRendering = preview?.status === 'rendering';
+  const activeLayout = suggestion.layout || 'landscape';
 
   return (
     <div className={styles.card}>
@@ -39,6 +46,27 @@ function DiagramCard({
             {nodeCount} node{nodeCount === 1 ? '' : 's'}
           </span>
         )}
+        <div
+          className={styles.layoutToggle}
+          role="group"
+          aria-label="Diagram orientation"
+        >
+          {LAYOUT_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={
+                activeLayout === option.value
+                  ? styles.layoutButtonActive
+                  : styles.layoutButton
+              }
+              disabled={isRendering || isSaving}
+              onClick={() => onSetLayout(suggestion.id, option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {suggestion.transcript_excerpt && (
@@ -104,6 +132,7 @@ export default function DiagramPanel({
   onAccept,
   onDismiss,
   onRenderPreview,
+  onSetLayout,
   onSeek,
 }) {
   return (
@@ -151,6 +180,7 @@ export default function DiagramPanel({
               onAccept={onAccept}
               onDismiss={onDismiss}
               onRenderPreview={onRenderPreview}
+              onSetLayout={onSetLayout}
               onSeek={onSeek}
             />
           ))}

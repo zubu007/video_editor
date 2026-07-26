@@ -1,0 +1,43 @@
+/* Fonts matching the backend's bundled caption fonts, so the live preview
+   approximates the burned result (falls back to the local stack offline). */
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Bangers&family=Montserrat:wght@800&display=swap');
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  container-type: size;
+  z-index: 2;
+}
+
+.caption {
+  position: absolute;
+  left: 5%;
+  right: 5%;
+  text-align: center;
+  line-height: 1.15;
+  font-weight: 800;
+  /* Chunky libass-style outline approximated with layered text shadows,
+     plus an optional soft drop shadow. */
+  text-shadow:
+    calc(var(--outline-width) * 1) 0 0 var(--outline-colour),
+    calc(var(--outline-width) * -1) 0 0 var(--outline-colour),
+    0 calc(var(--outline-width) * 1) 0 var(--outline-colour),
+    0 calc(var(--outline-width) * -1) 0 var(--outline-colour),
+    calc(var(--outline-width) * 0.7) calc(var(--outline-width) * 0.7) 0 var(--outline-colour),
+    calc(var(--outline-width) * -0.7) calc(var(--outline-width) * 0.7) 0 var(--outline-colour),
+    calc(var(--outline-width) * 0.7) calc(var(--outline-width) * -0.7) 0 var(--outline-colour),
+    calc(var(--outline-width) * -0.7) calc(var(--outline-width) * -0.7) 0 var(--outline-colour),
+    var(--shadow-depth) var(--shadow-depth) calc(var(--shadow-depth) * 0.5) rgba(0, 0, 0, 0.55);
+}
+
+.word {
+  display: inline-block;
+  margin: 0 0.14em;
+  transform: scale(1);
+  transition: transform 70ms ease-out;
+}
+
+.word.popped {
+  transform: scale(var(--pop-scale, 1.15));
+}

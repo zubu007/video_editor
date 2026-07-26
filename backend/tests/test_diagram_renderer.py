@@ -52,6 +52,9 @@ class TestSpecCacheKey(unittest.TestCase):
         self.assertNotEqual(
             base, spec_cache_key(make_spec(), transparent=False, quality="medium")
         )
+        self.assertNotEqual(
+            base, spec_cache_key(make_spec(layout="portrait"), False, "low")
+        )
 
 
 class TestGetOrRenderOverlay(unittest.TestCase):
@@ -125,8 +128,32 @@ class TestSceneTiming(unittest.TestCase):
 
     def test_node_positions_shapes(self):
         for diagram_type in ("flowchart", "timeline", "comparison", "cycle"):
-            positions = self.scenes.node_positions(diagram_type, 5)
-            self.assertEqual(len(positions), 5)
+            for layout in ("landscape", "portrait"):
+                positions = self.scenes.node_positions(diagram_type, 5, layout)
+                self.assertEqual(len(positions), 5)
+
+    def test_portrait_flowchart_is_a_single_column(self):
+        positions = self.scenes.node_positions("flowchart", 5, layout="portrait")
+
+        self.assertTrue(all(abs(pos[0]) < 1e-9 for pos in positions))
+        ys = [pos[1] for pos in positions]
+        self.assertEqual(ys, sorted(ys, reverse=True))  # top to bottom
+
+    def test_timeline_axis_follows_layout(self):
+        landscape = self.scenes.node_positions("timeline", 4, layout="landscape")
+        portrait = self.scenes.node_positions("timeline", 4, layout="portrait")
+
+        self.assertTrue(all(pos[1] == 0.0 for pos in landscape))
+        self.assertTrue(all(pos[0] == 0.0 for pos in portrait))
+        ys = [pos[1] for pos in portrait]
+        self.assertEqual(ys, sorted(ys, reverse=True))  # top to bottom
+
+    def test_portrait_cycle_is_taller_than_wide(self):
+        positions = self.scenes.node_positions("cycle", 6, layout="portrait")
+
+        xs = [pos[0] for pos in positions]
+        ys = [pos[1] for pos in positions]
+        self.assertGreater(max(ys) - min(ys), max(xs) - min(xs))
 
 
 if __name__ == "__main__":

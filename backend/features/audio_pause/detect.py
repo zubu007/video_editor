@@ -186,6 +186,42 @@ def get_total_silence_duration(pauses: List[dict]) -> float:
     return sum(p["duration"] for p in pauses)
 
 
+def apply_pause_padding(pauses: List[dict], padding: float = 0.1) -> List[dict]:
+    """
+    Shrinks pause segments by a padding on both sides.
+
+    Cutting flush against speech sounds abrupt, so a small cushion of silence is
+    left at each edge of the cut. Segments too short to keep a meaningful cut
+    after padding are dropped.
+
+    Args:
+        pauses (list): List of pause dictionaries.
+        padding (float): Cushion in seconds to leave at each edge. Default 0.1s.
+
+    Returns:
+        list: List of padded pause segments (may be shorter than the input).
+    """
+    if padding <= 0:
+        return pauses
+
+    padded = []
+    for pause in pauses:
+        start = pause["start"] + padding
+        end = pause["end"] - padding
+
+        # Nothing meaningful left to cut once both cushions are reserved.
+        if end <= start:
+            continue
+
+        padded_pause = pause.copy()
+        padded_pause["start"] = start
+        padded_pause["end"] = end
+        padded_pause["duration"] = end - start
+        padded.append(padded_pause)
+
+    return padded
+
+
 def merge_nearby_pauses(pauses: List[dict], max_gap: float = 0.5) -> List[dict]:
     """
     Merges pause segments that are close together.

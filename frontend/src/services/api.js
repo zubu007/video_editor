@@ -138,6 +138,7 @@ export async function suggestDiagrams(fileId, modelSize = 'base', additionalCont
 /**
  * Render one diagram suggestion to a preview video (Manim, cached server-side)
  * @param {Object} suggestion - Diagram suggestion with diagram_type, title, start, end, graph
+ *   and an optional layout ('landscape' | 'portrait')
  * @returns {Promise<{video_url: string, filename: string, cached: boolean}>}
  */
 export async function renderDiagramPreview(suggestion) {
@@ -147,6 +148,7 @@ export async function renderDiagramPreview(suggestion) {
     start: suggestion.start,
     end: suggestion.end,
     graph: suggestion.graph,
+    layout: suggestion.layout || 'landscape',
   });
 
   return response.data;
@@ -207,6 +209,7 @@ export async function detectAudioPauses(fileId, settings = {}) {
       silence_threshold: settings.silenceThreshold ?? -40,
       seek_step: settings.seekStep ?? 10,
       merge_gap: settings.mergeGap ?? 0.5,
+      padding: settings.padding ?? 0.1,
     },
   });
 
@@ -290,12 +293,25 @@ export function getStockFootageURL(filename) {
 }
 
 /**
- * Render a project with enabled edits
+ * Start a background render of a project's enabled edits.
+ * Rendering runs asynchronously; poll getRenderStatus(jobId) for progress and the result.
  * @param {string} projectId - Project ID
- * @returns {Promise<{output_url: string, filename: string, applied_edits: number}>}
+ * @returns {Promise<{job_id: string, status: string}>}
  */
 export async function renderProject(projectId) {
   const response = await apiClient.post(`/api/projects/${projectId}/render`);
+  return response.data;
+}
+
+/**
+ * Poll the status of a render job.
+ * @param {string} jobId - Job ID returned by renderProject
+ * @returns {Promise<{job_id: string, status: string, progress: number,
+ *   output_url: string|null, filename: string|null, applied_edits: number|null,
+ *   error: string|null}>}
+ */
+export async function getRenderStatus(jobId) {
+  const response = await apiClient.get(`/api/render/status/${jobId}`);
   return response.data;
 }
 
@@ -322,6 +338,19 @@ export async function saveProjectTimeline(projectId, segments, mediaAssetId = nu
     segments: segments.map(({ start, end }) => ({ start, end })),
     media_asset_id: mediaAssetId,
   });
+  return response.data;
+}
+
+/**
+ * List the caption style presets available for burned-in captions.
+ * @returns {Promise<{styles: Array<{name: string, font_family: string, font_scale: number,
+ *   text_colour: string, highlight_colour: string|null, outline_colour: string,
+ *   outline_scale: number, shadow_scale: number, margin_v_scale: number,
+ *   word_colours: string[], uppercase: boolean, pop_scale: number|null,
+ *   max_words_per_line: number}>, default_style: string}>}
+ */
+export async function getCaptionStyles() {
+  const response = await apiClient.get('/api/captions/styles');
   return response.data;
 }
 

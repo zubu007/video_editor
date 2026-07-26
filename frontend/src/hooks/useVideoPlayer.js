@@ -17,6 +17,9 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [error, setError] = useState(null);
+  // Width / height of the loaded video, so the player chrome can match the
+  // source aspect ratio (portrait vs landscape) instead of assuming 16:9.
+  const [aspectRatio, setAspectRatio] = useState(null);
 
   const safelyPlay = useCallback((video) => {
     const playPromise = video.play();
@@ -94,6 +97,9 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
 
     const handleLoadedMetadata = () => {
       setDuration(video.duration);
+      if (video.videoWidth && video.videoHeight) {
+        setAspectRatio(video.videoWidth / video.videoHeight);
+      }
       setError(null);
     };
 
@@ -178,6 +184,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
       isMuted,
       isFullscreen,
       error,
+      aspectRatio,
     },
     controls: {
       play,

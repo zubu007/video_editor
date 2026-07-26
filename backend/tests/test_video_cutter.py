@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from backend.features.video_cutter.cut import (
+    _RenderProgressLogger,
     cut_filler_words,
     render_timeline,
     render_with_edits,
@@ -215,8 +216,73 @@ class TestVideoCutter(unittest.TestCase):
         edited_duration = VideoFileClip(str(self.output_path)).duration
         self.assertAlmostEqual(edited_duration, 8, delta=0.5)
 
+    def test_render_reports_progress_to_callback(self):
+        seen = []
+        render_with_edits(
+            str(self.video_path),
+            [{"start": 1, "end": 2}],
+            [],
+            str(self.output_path),
+            on_progress=seen.append,
+        )
+
+        self.assertTrue(seen, "expected the encoder to report progress")
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in seen))
+        self.assertTrue(
+            all(b >= a for a, b in zip(seen, seen[1:])),
+            "progress should climb monotonically",
+        )
+        self.assertAlmostEqual(seen[-1], 1.0, delta=0.05)
+
     def tearDown(self):
         self.temp_dir.cleanup()
+
+
+class TestRenderProgressLogger(unittest.TestCase):
+    """The logger must track MoviePy's video bar and ignore the audio bar.
+
+    MoviePy ticks a ``frame_index`` bar per written video frame (``t`` on 1.x) and a
+    separate ``chunk`` bar for the audio pass, which completes *first*. Reporting the
+    audio bar too would send the UI's progress back to zero mid-render.
+    """
+
+    def _logger(self):
+        seen = []
+        logger = _RenderProgressLogger(seen.append)
+        return logger, seen
+
+    def test_reports_video_bar_as_fraction(self):
+        logger, seen = self._logger()
+        logger.bars["frame_index"] = {"total": 4}
+
+        for index in range(5):
+            logger.bars_callback("frame_index", "index", index)
+
+        self.assertEqual(seen, [0.0, 0.25, 0.5, 0.75, 1.0])
+
+    def test_ignores_audio_chunk_bar(self):
+        logger, seen = self._logger()
+        logger.bars["chunk"] = {"total": 10}
+
+        logger.bars_callback("chunk", "index", 5)
+
+        self.assertEqual(seen, [])
+
+    def test_ignores_non_index_attributes(self):
+        logger, seen = self._logger()
+        logger.bars["frame_index"] = {"total": 4}
+
+        logger.bars_callback("frame_index", "total", 4)
+
+        self.assertEqual(seen, [])
+
+    def test_tolerates_missing_total(self):
+        logger, seen = self._logger()
+        logger.bars["frame_index"] = {}
+
+        logger.bars_callback("frame_index", "index", 3)
+
+        self.assertEqual(seen, [])
 
 
 if __name__ == "__main__":

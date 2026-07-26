@@ -6,7 +6,9 @@ import TranscriptPanel from './components/TranscriptPanel/TranscriptPanel';
 import Timeline from './components/Timeline/Timeline';
 import SilenceTool from './components/EditorTools/SilenceTool';
 import CaptionTool from './components/EditorTools/CaptionTool';
+import CaptionsPanel from './components/EditorTools/CaptionsPanel';
 import EditingPlanPanel from './components/EditorTools/EditingPlanPanel';
+import EditsPanel from './components/EditorTools/EditsPanel';
 import StockFootagePanel from './components/EditorTools/StockFootagePanel';
 import DiagramPanel from './components/EditorTools/DiagramPanel';
 import ChatPanel from './components/Assistant/ChatPanel';
@@ -25,6 +27,7 @@ import {
   updateProjectEdit,
   deleteProjectEdit,
   renderProject,
+  getRenderStatus,
   getProjectTimeline,
   saveProjectTimeline,
   generateEditingPlan,
@@ -33,9 +36,13 @@ import {
   downloadStockFootage,
   getStockFootageURL,
   getAbsoluteAPIURL,
+  getCaptionStyles,
   sendProjectChat,
 } from './services/api';
 import './App.css';
+
+// How often to poll a running render job for progress.
+const RENDER_POLL_INTERVAL_MS = 1000;
 
 function App() {
   const { settings, updateSetting } = useSettings();
@@ -66,6 +73,14 @@ function App() {
   const [savedZoomEdits, setSavedZoomEdits] = useState([]);
   const [savedStockEdits, setSavedStockEdits] = useState([]);
   const [savedDiagramEdits, setSavedDiagramEdits] = useState([]);
+  // Burned-in caption presets fetched once from the backend, the user's
+  // current pick in the Captions tab, and the saved captions edit (if any).
+  const [captionStyles, setCaptionStyles] = useState([]);
+  const [captionStyleName, setCaptionStyleName] = useState(null);
+  const [captionWordsPerLine, setCaptionWordsPerLine] = useState(null);
+  const [savedCaptionsEdits, setSavedCaptionsEdits] = useState([]);
+  const [isSavingCaptions, setIsSavingCaptions] = useState(false);
+  const [captionsError, setCaptionsError] = useState(null);
   const [editingPlan, setEditingPlan] = useState([]);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [planError, setPlanError] = useState(null);
@@ -75,6 +90,9 @@ function App() {
   const [savingDiagramId, setSavingDiagramId] = useState(null);
   // Per-suggestion motion-diagram previews: {[suggestionId]: {status, url, error}}.
   const [diagramPreviews, setDiagramPreviews] = useState({});
+  // Source video aspect ratio (width / height), reported by the player once
+  // metadata loads; portrait sources default new diagrams to portrait layout.
+  const [videoAspectRatio, setVideoAspectRatio] = useState(null);
   // Timeline selection driving the inspector: {kind: 'segment'|'overlay', id}.
   const [inspected, setInspected] = useState(null);
   // Per-overlay status of stock footage re-downloads started from the inspector.
@@ -92,12 +110,16 @@ function App() {
   const [isDetectingSilence, setIsDetectingSilence] = useState(false);
   const [isConfirmingCuts, setIsConfirmingCuts] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
+  // Render progress as a 0.0–1.0 fraction while a background render job runs.
+  const [renderProgress, setRenderProgress] = useState(0);
   // Assistant chat feed: 'log' entries (editor activity) interleaved with
   // 'user'/'assistant' conversation turns.
   const [chatMessages, setChatMessages] = useState([]);
   const [isChatSending, setIsChatSending] = useState(false);
   const [chatError, setChatError] = useState(null);
   const videoPlayerRef = useRef(null);
+  // Holds the setInterval id for polling the active render job's status.
+  const renderPollRef = useRef(null);
 
   // Append an editor-activity note to the assistant feed (readable log line).
   const logActivity = (content) => {
@@ -153,13 +175,75 @@ function App() {
       edits.filter((edit) => edit.type === 'insert_stock_footage')
     );
     setSavedDiagramEdits(edits.filter((edit) => edit.type === 'diagram'));
+    const captionsEdits = edits.filter((edit) => edit.type === 'captions');
+    setSavedCaptionsEdits(captionsEdits);
+    // Adopt the saved captions settings so the panel and live preview match.
+    if (captionsEdits[0]?.metadata?.style) {
+      setCaptionStyleName(captionsEdits[0].metadata.style);
+      setCaptionWordsPerLine(captionsEdits[0].metadata.max_words_per_line ?? null);
+    }
   };
+
+  // Load the caption style presets once; the default becomes the initial pick.
+  useEffect(() => {
+    let cancelled = false;
+    getCaptionStyles()
+      .then((data) => {
+        if (cancelled) return;
+        setCaptionStyles(data.styles);
+        setCaptionStyleName((current) => current || data.default_style);
+      })
+      .catch((error) => {
+        console.error('Error loading caption styles:', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Overlay edits shown as movable clips on the timeline's overlay lanes.
   const timelineOverlays = useMemo(
     () => [...savedZoomEdits, ...savedStockEdits, ...savedDiagramEdits],
     [savedZoomEdits, savedStockEdits, savedDiagramEdits]
   );
+
+  // Any saved edit (cut, zoom, stock, diagram, captions) or a custom timeline
+  // makes the project renderable — the render endpoint supports each alone.
+  const hasRenderableContent =
+    editOperations.length > 0 ||
+    timelineOverlays.length > 0 ||
+    savedCaptionsEdits.length > 0 ||
+    hasSavedTimeline;
+
+  // Live caption preview on the player: while the Captions tab is open it
+  // tracks the user's current pick; otherwise it reflects the saved captions
+  // edit (if enabled). The exact look is burned server-side at render time.
+  const captionPreview = useMemo(() => {
+    if (transcriptWords.length === 0 || captionStyles.length === 0) return null;
+    const saved = savedCaptionsEdits.find((edit) => edit.enabled !== false);
+    const previewing = activePanel === 'captions';
+    const styleName = previewing
+      ? captionStyleName
+      : saved
+        ? saved.metadata?.style || captionStyleName
+        : null;
+    const style = captionStyles.find((entry) => entry.name === styleName);
+    if (!style) return null;
+    return {
+      words: transcriptWords,
+      style,
+      wordsPerLine: previewing
+        ? captionWordsPerLine
+        : (saved?.metadata?.max_words_per_line ?? null),
+    };
+  }, [
+    transcriptWords,
+    captionStyles,
+    savedCaptionsEdits,
+    activePanel,
+    captionStyleName,
+    captionWordsPerLine,
+  ]);
 
   // Stock-footage suggestions extracted from the current editing plan.
   const stockFootageItems = useMemo(
@@ -214,10 +298,13 @@ function App() {
     setSavedZoomEdits([]);
     setSavedStockEdits([]);
     setSavedDiagramEdits([]);
+    setSavedCaptionsEdits([]);
+    setCaptionsError(null);
     setEditingPlan([]);
     setDiagramSuggestions([]);
     setDiagramError(null);
     setSavingDiagramId(null);
+    setVideoAspectRatio(null);
     setInspected(null);
     setStockRefetch({});
     setStockDownloads({});
@@ -582,6 +669,82 @@ function App() {
     }
   };
 
+  // Save (or update) the project's single captions edit: full-video span with
+  // the chosen style and the loaded word transcript in its metadata, so the
+  // render doesn't have to re-transcribe.
+  const handleSaveCaptions = async () => {
+    if (!projectId || !sourceDuration || transcriptWords.length === 0) return;
+
+    setIsSavingCaptions(true);
+    setCaptionsError(null);
+    const metadata = {
+      style: captionStyleName,
+      words: transcriptWords.map(({ start, end, word }) => ({ start, end, word })),
+    };
+    if (captionWordsPerLine) {
+      metadata.max_words_per_line = captionWordsPerLine;
+    }
+
+    try {
+      const existing = savedCaptionsEdits[0];
+      if (existing) {
+        await updateProjectEdit(projectId, existing.id, { metadata });
+      } else {
+        await createProjectEdits(projectId, [
+          {
+            type: 'captions',
+            source: 'captions_tool',
+            start: 0,
+            end: sourceDuration,
+            enabled: true,
+            media_asset_id: mediaAssetId,
+            metadata,
+          },
+        ]);
+      }
+      const edits = await getProjectEdits(projectId);
+      applyLoadedEdits(edits.edits);
+      logActivity(`Saved ${captionStyleName} captions for the render.`);
+    } catch (error) {
+      console.error('Error saving captions:', error);
+      setCaptionsError('Could not save captions.');
+    } finally {
+      setIsSavingCaptions(false);
+    }
+  };
+
+  const handleToggleCaptionsEdit = async (edit) => {
+    if (!projectId) return;
+
+    setCaptionsError(null);
+    try {
+      const updated = await updateProjectEdit(projectId, edit.id, {
+        enabled: edit.enabled === false,
+      });
+      setSavedCaptionsEdits((edits) =>
+        edits.map((existing) => (existing.id === updated.id ? updated : existing))
+      );
+    } catch (error) {
+      console.error('Error updating captions edit:', error);
+      setCaptionsError('Could not update the saved captions.');
+    }
+  };
+
+  const handleDeleteCaptionsEdit = async (edit) => {
+    if (!projectId) return;
+
+    setCaptionsError(null);
+    try {
+      await deleteProjectEdit(projectId, edit.id);
+      setSavedCaptionsEdits((edits) =>
+        edits.filter((existing) => existing.id !== edit.id)
+      );
+    } catch (error) {
+      console.error('Error deleting captions edit:', error);
+      setCaptionsError('Could not remove the saved captions.');
+    }
+  };
+
   const DEFAULT_OVERLAY_DURATION = 3;
 
   // Which state slice holds each overlay type, so timeline drag/trim/delete
@@ -592,29 +755,20 @@ function App() {
     diagram: setSavedDiagramEdits,
   };
 
-  const handleAddOverlay = async (type) => {
+  // Persist a new effect edit at the playhead with the given metadata, then
+  // reload edits so the timeline lanes and the Edits list reflect it.
+  const persistNewEdit = async (type, metadata, source = 'timeline') => {
     if (!projectId || !sourceDuration) return;
 
     const length = Math.min(DEFAULT_OVERLAY_DURATION, sourceDuration);
     const start = Math.max(0, Math.min(currentTime, sourceDuration - length));
-
-    let metadata = {};
-    if (type === 'zoom') {
-      metadata = { zoom_level: 1.2 };
-    } else if (type === 'insert_stock_footage') {
-      const query = window.prompt('Search Pexels for B-roll footage:');
-      if (!query?.trim()) return;
-      metadata = { search_query: query.trim() };
-    } else if (type === 'diagram') {
-      metadata = { diagram_type: 'flowchart' };
-    }
 
     setToolError(null);
     try {
       await createProjectEdits(projectId, [
         {
           type,
-          source: 'timeline',
+          source,
           start,
           end: start + length,
           enabled: true,
@@ -624,11 +778,38 @@ function App() {
       ]);
       const edits = await getProjectEdits(projectId);
       applyLoadedEdits(edits.edits);
-      logActivity(`Added a ${type.replaceAll('_', ' ')} overlay at ${start.toFixed(1)}s.`);
+      logActivity(`Added a ${type.replaceAll('_', ' ')} edit at ${start.toFixed(1)}s.`);
     } catch (error) {
-      console.error('Error adding overlay:', error);
-      setToolError('Could not add the overlay.');
+      console.error('Error adding edit:', error);
+      setToolError('Could not add the edit.');
     }
+  };
+
+  const handleAddOverlay = (type) => {
+    let metadata = {};
+    if (type === 'zoom') {
+      metadata = { zoom_level: 1.2 };
+    } else if (type === 'insert_stock_footage') {
+      const query = window.prompt('Search Pexels for B-roll footage:');
+      if (!query?.trim()) return undefined;
+      metadata = { search_query: query.trim() };
+    } else if (type === 'diagram') {
+      metadata = { diagram_type: 'flowchart' };
+    }
+    return persistNewEdit(type, metadata);
+  };
+
+  // Manually add an effect edit from the Edits tab. Unlike the timeline's
+  // add-overlay, stock starts with an empty query that is filled in (and
+  // downloaded) inline from the Edits list afterward — no prompt.
+  const handleAddEdit = (type) => {
+    const metadata =
+      type === 'zoom'
+        ? { zoom_level: 1.2 }
+        : type === 'insert_stock_footage'
+          ? { search_query: '', media_type: 'video' }
+          : { diagram_type: 'flowchart', title: 'Diagram' };
+    return persistNewEdit(type, metadata, 'manual');
   };
 
   const handleUpdateOverlay = async (overlay, changes) => {
@@ -719,9 +900,17 @@ function App() {
     setDiagramError(null);
     try {
       const result = await suggestDiagrams(fileId, 'base');
+      // Match the overlay orientation to the source by default; each card has
+      // a toggle to override it.
+      const defaultLayout =
+        videoAspectRatio && videoAspectRatio < 1 ? 'portrait' : 'landscape';
       setDiagramSuggestions(
         (result.diagrams || [])
-          .map((diagram) => ({ id: crypto.randomUUID(), ...diagram }))
+          .map((diagram) => ({
+            id: crypto.randomUUID(),
+            ...diagram,
+            layout: defaultLayout,
+          }))
           .sort((a, b) => a.start - b.start)
       );
       logActivity(
@@ -762,6 +951,7 @@ function App() {
             transcript_excerpt: suggestion.transcript_excerpt,
             reason: suggestion.reason,
             graph: suggestion.graph,
+            layout: suggestion.layout || 'landscape',
           },
         },
       ]);
@@ -779,6 +969,22 @@ function App() {
     } finally {
       setSavingDiagramId(null);
     }
+  };
+
+  // Switch a suggestion between landscape and portrait. Any rendered preview
+  // is dropped because it no longer matches the chosen orientation.
+  const handleSetDiagramLayout = (suggestionId, layout) => {
+    setDiagramSuggestions((items) =>
+      items.map((item) =>
+        item.id === suggestionId ? { ...item, layout } : item
+      )
+    );
+    setDiagramPreviews((previews) => {
+      if (!(suggestionId in previews)) return previews;
+      const next = { ...previews };
+      delete next[suggestionId];
+      return next;
+    });
   };
 
   const handleDismissDiagram = (suggestionId) => {
@@ -1075,29 +1281,66 @@ function App() {
     }
   };
 
+  // Rendering runs as a background job on the backend: start it, then poll its
+  // status for progress and the final download URL. The interval id lives in
+  // renderPollRef so it can be cleared on completion, error, or unmount.
+  const stopRenderPolling = () => {
+    if (renderPollRef.current) {
+      clearInterval(renderPollRef.current);
+      renderPollRef.current = null;
+    }
+  };
+
   const handleRenderProject = async () => {
     if (!projectId) return;
 
+    stopRenderPolling();
     setIsRendering(true);
+    setRenderProgress(0);
+    setRenderResult(null);
     setToolError(null);
+
     try {
-      const result = await renderProject(projectId);
-      setRenderResult({
-        filename: result.filename,
-        url: getAbsoluteAPIURL(result.output_url),
-        appliedEdits: result.applied_edits,
-      });
-      logActivity(
-        `Rendered "${result.filename}" with ${result.applied_edits} edits applied.`
-      );
+      const { job_id: jobId } = await renderProject(projectId);
+      renderPollRef.current = setInterval(async () => {
+        try {
+          const status = await getRenderStatus(jobId);
+          setRenderProgress(status.progress || 0);
+          if (status.status === 'done') {
+            stopRenderPolling();
+            setRenderProgress(1);
+            setRenderResult({
+              filename: status.filename,
+              url: getAbsoluteAPIURL(status.output_url),
+              appliedEdits: status.applied_edits,
+            });
+            setIsRendering(false);
+            logActivity(
+              `Rendered "${status.filename}" with ${status.applied_edits} edits applied.`
+            );
+          } else if (status.status === 'error') {
+            stopRenderPolling();
+            setToolError(status.error || 'Could not render the project.');
+            setIsRendering(false);
+            logActivity('Render failed. Check the render page for details.');
+          }
+        } catch (error) {
+          stopRenderPolling();
+          console.error('Error polling render status:', error);
+          setToolError('Lost contact with the render job.');
+          setIsRendering(false);
+        }
+      }, RENDER_POLL_INTERVAL_MS);
     } catch (error) {
-      console.error('Error rendering project:', error);
-      setToolError('Could not render the project.');
-      logActivity('Render failed. Check the render page for details.');
-    } finally {
+      console.error('Error starting render:', error);
+      setToolError('Could not start the render.');
       setIsRendering(false);
+      logActivity('Render failed. Check the render page for details.');
     }
   };
+
+  // Stop any in-flight render polling if the app unmounts.
+  useEffect(() => stopRenderPolling, []);
 
   const handleGoToRender = () => {
     setCurrentView('render');
@@ -1128,10 +1371,13 @@ function App() {
     setSavedZoomEdits([]);
     setSavedStockEdits([]);
     setSavedDiagramEdits([]);
+    setSavedCaptionsEdits([]);
+    setCaptionsError(null);
     setEditingPlan([]);
     setDiagramSuggestions([]);
     setDiagramError(null);
     setSavingDiagramId(null);
+    setVideoAspectRatio(null);
     setInspected(null);
     setStockRefetch({});
     setStockDownloads({});
@@ -1176,6 +1422,28 @@ function App() {
                   <strong>Record new footage</strong>
                   <span>Capture video with your camera and microphone</span>
                 </button>
+                <button
+                  type="button"
+                  className="source-card"
+                  onClick={() => setSourceMode('youtube')}
+                >
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M21.6 7.2a2.6 2.6 0 0 0-1.83-1.84C18.15 4.92 12 4.92 12 4.92s-6.15 0-7.77.44A2.6 2.6 0 0 0 2.4 7.2C1.97 8.82 1.97 12 1.97 12s0 3.18.43 4.8a2.6 2.6 0 0 0 1.83 1.84c1.62.44 7.77.44 7.77.44s6.15 0 7.77-.44a2.6 2.6 0 0 0 1.83-1.84c.43-1.62.43-4.8.43-4.8s0-3.18-.43-4.8zM10 15.5v-7l6 3.5-6 3.5z" />
+                  </svg>
+                  <strong>Edit an existing YouTube video</strong>
+                  <span>Paste a YouTube link to download and edit it</span>
+                </button>
+                <button
+                  type="button"
+                  className="source-card"
+                  onClick={() => setSourceMode('gaming')}
+                >
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17 4H7a6 6 0 0 0-6 6v4a3 3 0 0 0 5.4 1.8L8 14h8l1.6 1.8A3 3 0 0 0 23 14v-4a6 6 0 0 0-6-6zM8 12H6v2H5v-2H3v-1h2V9h1v2h2v1zm7-2a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm3 2a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />
+                  </svg>
+                  <strong>Edit a gaming video</strong>
+                  <span>Coming soon</span>
+                </button>
               </div>
             </div>
           ) : (
@@ -1192,6 +1460,16 @@ function App() {
                   onVideoSelect={handleVideoSelect}
                   onYouTubeImport={handleYouTubeImport}
                 />
+              ) : sourceMode === 'youtube' ? (
+                <VideoUpload
+                  youtubeOnly
+                  onYouTubeImport={handleYouTubeImport}
+                />
+              ) : sourceMode === 'gaming' ? (
+                <div className="source-placeholder">
+                  <h3>Gaming video editing</h3>
+                  <p>This mode isn&apos;t available yet — check back soon.</p>
+                </div>
               ) : (
                 <RecordVideo onVideoSelect={handleVideoSelect} />
               )}
@@ -1208,6 +1486,8 @@ function App() {
               onEnded={handleVideoEnded}
               waveformData={waveformData}
               rangeMarkers={rangeMarkers}
+              onAspectRatioChange={setVideoAspectRatio}
+              captionPreview={captionPreview}
             />
 
             <Timeline
@@ -1288,6 +1568,13 @@ function App() {
               </button>
               <button
                 type="button"
+                className={activePanel === 'edits' ? 'active' : ''}
+                onClick={() => setActivePanel('edits')}
+              >
+                Edits
+              </button>
+              <button
+                type="button"
                 className={activePanel === 'stock' ? 'active' : ''}
                 onClick={() => setActivePanel('stock')}
               >
@@ -1299,6 +1586,13 @@ function App() {
                 onClick={() => setActivePanel('diagrams')}
               >
                 Diagrams
+              </button>
+              <button
+                type="button"
+                className={activePanel === 'captions' ? 'active' : ''}
+                onClick={() => setActivePanel('captions')}
+              >
+                Captions
               </button>
               <button
                 type="button"
@@ -1314,11 +1608,9 @@ function App() {
                 <SilenceTool
                   detectedPauses={detectedPauses}
                   editOperations={editOperations}
-                  renderResult={renderResult}
                   loading={{
                     detecting: isDetectingSilence,
                     confirming: isConfirmingCuts,
-                    rendering: isRendering,
                   }}
                   error={toolError}
                   onDetect={handleDetectSilence}
@@ -1326,7 +1618,6 @@ function App() {
                   onConfirm={handleConfirmSilenceCuts}
                   onToggleEdit={handleToggleStoredEdit}
                   onDeleteEdit={handleDeleteStoredEdit}
-                  onRender={handleGoToRender}
                   onSeek={handleSeek}
                 />
               )}
@@ -1345,6 +1636,20 @@ function App() {
                   onDeleteItem={handleDeletePlanItem}
                   onSaveZoomEdits={handleSaveZoomEdits}
                   savedZoomCount={savedZoomEdits.length}
+                />
+              )}
+              {activePanel === 'edits' && (
+                <EditsPanel
+                  edits={timelineOverlays}
+                  sourceDuration={sourceDuration || 0}
+                  stockRefetch={stockRefetch}
+                  error={toolError}
+                  hasProject={Boolean(projectId)}
+                  onAddEdit={handleAddEdit}
+                  onUpdateOverlay={handleUpdateOverlay}
+                  onDeleteOverlay={handleDeleteOverlay}
+                  onRefetchStock={handleRefetchStockFootage}
+                  onSeek={handleSeek}
                 />
               )}
               {activePanel === 'stock' && (
@@ -1373,7 +1678,24 @@ function App() {
                   onAccept={handleAcceptDiagram}
                   onDismiss={handleDismissDiagram}
                   onRenderPreview={handleRenderDiagramPreview}
+                  onSetLayout={handleSetDiagramLayout}
                   onSeek={handleSeek}
+                />
+              )}
+              {activePanel === 'captions' && (
+                <CaptionsPanel
+                  captionStyles={captionStyles}
+                  selectedStyle={captionStyleName}
+                  wordsPerLine={captionWordsPerLine}
+                  savedCaptions={savedCaptionsEdits}
+                  hasWords={transcriptWords.length > 0}
+                  saving={isSavingCaptions}
+                  error={captionsError}
+                  onSelectStyle={setCaptionStyleName}
+                  onChangeWordsPerLine={setCaptionWordsPerLine}
+                  onSave={handleSaveCaptions}
+                  onToggle={handleToggleCaptionsEdit}
+                  onDelete={handleDeleteCaptionsEdit}
                 />
               )}
               {activePanel === 'transcript' && (
@@ -1474,17 +1796,30 @@ function App() {
           type="button"
           className="render-submit"
           onClick={handleRenderProject}
-          disabled={
-            isRendering ||
-            !projectId ||
-            (editOperations.length === 0 &&
-              savedZoomEdits.length === 0 &&
-              savedStockEdits.length === 0 &&
-              !hasSavedTimeline)
-          }
+          disabled={isRendering || !projectId || !hasRenderableContent}
         >
           {isRendering ? 'Rendering...' : 'Render Video'}
         </button>
+
+        {isRendering && (
+          <div
+            className="render-progress"
+            role="progressbar"
+            aria-valuenow={Math.round(renderProgress * 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div className="render-progress-track">
+              <div
+                className="render-progress-fill"
+                style={{ width: `${Math.round(renderProgress * 100)}%` }}
+              />
+            </div>
+            <span className="render-progress-label">
+              Rendering… {Math.round(renderProgress * 100)}%
+            </span>
+          </div>
+        )}
 
         {toolError && <div className="render-error">{toolError}</div>}
 
@@ -1504,14 +1839,31 @@ function App() {
           <h1>Video Editor</h1>
           <span>{projectId ? `Project ${projectId}` : 'No project loaded'}</span>
         </div>
-        <button
-          type="button"
-          className="settings-button"
-          onClick={() => setSettingsOpen(true)}
-          aria-label="Open settings"
-        >
-          ⚙ Settings
-        </button>
+        <div className="top-bar-actions">
+          {projectId && currentView === 'editor' && (
+            <button
+              type="button"
+              className="render-cta"
+              onClick={handleGoToRender}
+              disabled={!hasRenderableContent}
+              title={
+                hasRenderableContent
+                  ? 'Choose export settings and render the video'
+                  : 'Add an edit, overlay, or timeline change first'
+              }
+            >
+              Final Render
+            </button>
+          )}
+          <button
+            type="button"
+            className="settings-button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open settings"
+          >
+            ⚙ Settings
+          </button>
+        </div>
       </header>
 
       {currentView === 'render' ? renderRenderPage() : renderEditor()}

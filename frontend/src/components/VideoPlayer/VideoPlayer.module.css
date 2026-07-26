@@ -1,17 +1,31 @@
 .playerWrapper {
   width: 100%;
-  max-width: min(100%, 1500px);
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 8px;
+}
+
+/* The area available for the video itself (everything above the controls).
+   It is a size container so the video box below can size itself with cq
+   units to the largest rectangle of the source's aspect ratio that fits —
+   portrait videos use the full height, landscape ones the full width. */
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  container-type: size;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .videoPlayerContainer {
   position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--video-aspect, 16 / 9);
+  width: min(100cqw, calc(100cqh * var(--video-aspect, 1.7778)));
   background-color: #000;
-  border-radius: 6px 6px 0 0;
+  border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   cursor: pointer;
@@ -26,9 +40,26 @@
 
 .controlsSection {
   background-color: #1a1a1a;
-  border-radius: 0 0 6px 6px;
+  border-radius: 8px;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
   padding: 0;
+}
+
+/* Small screens flow vertically (auto-height rows), so the stage cannot
+   derive its height from the layout — give it one. */
+@media (max-width: 640px) {
+  .stage {
+    min-height: 300px;
+  }
+}
+
+.placeholderBox {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background-color: #000;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .placeholder {
@@ -96,9 +127,10 @@
 .playerWrapper:-webkit-full-screen,
 .playerWrapper:-moz-full-screen,
 .playerWrapper:-ms-fullscreen {
-  max-width: none;
   width: 100vw;
   height: 100vh;
+  gap: 0;
+  background-color: #000;
 }
 
 .playerWrapper:fullscreen .videoPlayerContainer,
@@ -106,7 +138,6 @@
 .playerWrapper:-moz-full-screen .videoPlayerContainer,
 .playerWrapper:-ms-fullscreen .videoPlayerContainer {
   border-radius: 0;
-  max-height: calc(100vh - 80px);
 }
 
 .playerWrapper:fullscreen .controlsSection,

@@ -71,6 +71,32 @@
   border-color: var(--primary);
 }
 
+.top-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.render-cta {
+  border: 0;
+  border-radius: 6px;
+  background: var(--primary);
+  color: white;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 14px;
+}
+
+.render-cta:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.render-cta:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .app-main {
   min-height: 0;
   overflow: hidden;
@@ -105,8 +131,14 @@
 
 .source-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 20px;
+}
+
+@media (max-width: 560px) {
+  .source-options {
+    grid-template-columns: 1fr;
+  }
 }
 
 .source-card {
@@ -161,6 +193,26 @@
   align-self: flex-start;
 }
 
+.source-placeholder {
+  padding: 48px 24px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  text-align: center;
+}
+
+.source-placeholder h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  color: var(--text);
+}
+
+.source-placeholder p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .workspace {
   height: calc(100vh - 52px);
   display: grid;
@@ -178,9 +230,10 @@
   overflow: hidden;
 }
 
+/* The video player wrapper stretches to fill the whole first row so the
+   preview can use all available vertical space (important for portrait). */
 .player-section > :first-child {
-  align-self: center;
-  justify-self: center;
+  min-height: 0;
 }
 
 .status-strip {
@@ -357,6 +410,33 @@
 .render-submit:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.render-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.render-progress-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.render-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+
+.render-progress-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .render-error {

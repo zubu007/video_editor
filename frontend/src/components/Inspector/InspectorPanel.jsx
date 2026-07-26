@@ -17,7 +17,11 @@ const OVERLAY_BADGE_CLASSES = {
 
 const DIAGRAM_TYPES = ['flowchart', 'timeline', 'comparison', 'cycle'];
 
-const MIN_LENGTH = 0.2;
+// Matches the Manim scene's default dark fill, so switching from transparent
+// to a solid color starts from the familiar preview background.
+const DEFAULT_DIAGRAM_BACKGROUND = '#0f172a';
+
+export const MIN_LENGTH = 0.2;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -29,7 +33,7 @@ function round2(value) {
 
 // Numeric input that keeps a local draft while typing and only commits a
 // clamped value on blur/Enter, so keystrokes don't fire a PATCH each.
-function NumberField({ label, value, min, max, step = 0.1, onCommit }) {
+export function NumberField({ label, value, min, max, step = 0.1, onCommit }) {
   const [draft, setDraft] = useState(String(round2(value)));
 
   useEffect(() => {
@@ -118,7 +122,7 @@ function SegmentInspector({
   );
 }
 
-function ZoomOptions({ overlay, onUpdateOverlay }) {
+export function ZoomOptions({ overlay, onUpdateOverlay }) {
   const zoomLevel = Number(overlay.metadata?.zoom_level) || 1.2;
   // Draft while the slider is dragged; committed once on release.
   const [zoomDraft, setZoomDraft] = useState(null);
@@ -165,7 +169,7 @@ function ZoomOptions({ overlay, onUpdateOverlay }) {
   );
 }
 
-function StockOptions({ overlay, stockStatus, onRefetchStock }) {
+export function StockOptions({ overlay, stockStatus, onRefetchStock }) {
   const [queryDraft, setQueryDraft] = useState(
     overlay.metadata?.search_query || ''
   );
@@ -246,13 +250,28 @@ function StockOptions({ overlay, stockStatus, onRefetchStock }) {
   );
 }
 
-function DiagramOptions({ overlay, onUpdateOverlay }) {
+export function DiagramOptions({ overlay, onUpdateOverlay }) {
   const meta = overlay.metadata || {};
   const [titleDraft, setTitleDraft] = useState(meta.title || '');
+  // Absent or "transparent" means the clip renders with an alpha channel;
+  // any other value is a solid #rrggbb background color.
+  const backgroundColor =
+    meta.background && meta.background !== 'transparent' ? meta.background : null;
+  // Color input fires change on every drag inside the picker; keep a draft
+  // and only PATCH when the picker closes (blur).
+  const [colorDraft, setColorDraft] = useState(
+    backgroundColor || DEFAULT_DIAGRAM_BACKGROUND
+  );
 
   useEffect(() => {
-    setTitleDraft(overlay.metadata?.title || '');
-    // Re-seed the draft only when a different diagram is inspected.
+    const currentMeta = overlay.metadata || {};
+    setTitleDraft(currentMeta.title || '');
+    setColorDraft(
+      currentMeta.background && currentMeta.background !== 'transparent'
+        ? currentMeta.background
+        : DEFAULT_DIAGRAM_BACKGROUND
+    );
+    // Re-seed the drafts only when a different diagram is inspected.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overlay.id]);
 
@@ -260,6 +279,12 @@ function DiagramOptions({ overlay, onUpdateOverlay }) {
     const next = titleDraft.trim();
     if (next !== (meta.title || '')) {
       onUpdateOverlay(overlay, { metadata: { ...meta, title: next } });
+    }
+  };
+
+  const commitBackground = (value) => {
+    if (value !== (meta.background || 'transparent')) {
+      onUpdateOverlay(overlay, { metadata: { ...meta, background: value } });
     }
   };
 
@@ -296,6 +321,32 @@ function DiagramOptions({ overlay, onUpdateOverlay }) {
             }}
           />
         </label>
+        <label className={styles.field}>
+          Background
+          <select
+            value={backgroundColor ? 'color' : 'transparent'}
+            onChange={(event) =>
+              commitBackground(
+                event.target.value === 'color' ? colorDraft : 'transparent'
+              )
+            }
+          >
+            <option value="transparent">Transparent (video shows through)</option>
+            <option value="color">Solid color</option>
+          </select>
+        </label>
+        {backgroundColor && (
+          <label className={styles.field}>
+            Background color
+            <input
+              type="color"
+              className={styles.colorInput}
+              value={colorDraft}
+              onChange={(event) => setColorDraft(event.target.value)}
+              onBlur={(event) => commitBackground(event.target.value)}
+            />
+          </label>
+        )}
       </div>
 
       {meta.transcript_excerpt && (

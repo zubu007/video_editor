@@ -54,7 +54,6 @@ function StoredEditRow({ edit, onToggle, onSeek, onDelete }) {
 export default function SilenceTool({
   detectedPauses,
   editOperations,
-  renderResult,
   loading,
   error,
   onDetect,
@@ -62,7 +61,6 @@ export default function SilenceTool({
   onConfirm,
   onToggleEdit,
   onDeleteEdit,
-  onRender,
   onSeek,
 }) {
   const enabledProposalCount = detectedPauses.filter((pause) => pause.enabled !== false).length;
@@ -134,22 +132,6 @@ export default function SilenceTool({
               />
             ))}
           </div>
-        )}
-      </div>
-
-      <div className={styles.footer}>
-        <button
-          type="button"
-          className={styles.renderButton}
-          onClick={onRender}
-          disabled={editOperations.length === 0}
-        >
-          Final Render
-        </button>
-        {renderResult && (
-          <a className={styles.renderLink} href={renderResult.url} target="_blank" rel="noreferrer">
-            Download {renderResult.filename}
-          </a>
         )}
       </div>
     </section>

@@ -135,6 +135,14 @@
   border-color: var(--primary);
 }
 
+.field input[type='color'],
+.colorInput {
+  padding: 2px;
+  height: 32px;
+  min-width: 64px;
+  cursor: pointer;
+}
+
 .stockSearch {
   display: flex;
   align-items: flex-end;

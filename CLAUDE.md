@@ -98,7 +98,8 @@ to understand:
    work references the `file_id` (e.g. `/api/transcript/words/{file_id}`,
    `/api/audio/pauses/{file_id}`) and edits are saved as `EditOperation` rows via
    `/api/projects/{project_id}/edits/*`. `POST /api/projects/{project_id}/render` collects the
-   enabled cut edits and renders the final video. Uploaded files here are **not** auto-deleted.
+   enabled edits and renders the final video **as a background job** (see Rendering below).
+   Uploaded files here are **not** auto-deleted.
 
 The frontend uses pattern #2 end-to-end (see data flow below).
 
@@ -122,6 +123,15 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   prompt and the response is validated against the registry (timestamps in bounds, known feature,
   required params present). **To add an editing effect, register it here** so the LLM can emit it.
 - `pexels/download.py` — searches Pexels and downloads B-roll into `temp/outputs/`.
+- `captions/` — burns shorts-style animated captions (word-by-word highlight/pop) into a video.
+  `layout.py` groups word-level transcript entries into 2-5 word "pages"; `styles.py` holds the
+  `STYLE_PRESETS` (bold-pop, rainbow, karaoke, minimal) and bundled fonts in `backend/assets/fonts/`;
+  `ass_builder.py` emits an ASS subtitle document (one Dialogue event per word for highlight styles);
+  `burn.py` runs ffmpeg's libass `ass` filter as a **final pass** over an already-rendered video —
+  `add_captions(video_path, words, output_path, style=...)` is the entry point. Word timestamps must
+  be on the timeline of the video being burned: `remap.py` (`output_intervals` + `remap_words`)
+  converts source-time words to output time, mirroring the renderer's cut/timeline semantics
+  exactly. Persisted as `EditOperation` rows of `type="captions"` (see Persistence).
 - `caption_removal/` — removes burned-in captions via the external VideoSubtitleRemover tool
   (see Environment → caption-removal setup). `remove.py` builds and runs the tool's CLI as an
   isolated subprocess; `jobs.py` is a thread-safe **in-memory** job registry (jobs are lost on
@@ -136,12 +146,43 @@ SQLModel over SQLite at `data/video_editor.db` (created on startup via `init_db(
 lifespan). Core tables: `Project`, `MediaAsset` (one source file, keyed by `file_id`), and
 `EditOperation` (non-destructive edit, with `enabled` flag and a JSON `details` column). Routes get
 a session via the `get_session` FastAPI dependency. The generic edit endpoints accept the types in
-`SUPPORTED_EDIT_TYPES` (`cut`, `zoom`, `insert_stock_footage`). Timeline segments — the ordered,
-possibly rearranged source ranges built in the frontend's `Timeline` component — are stored as
-`EditOperation` rows of `type="timeline_segment"` (order in `details["position"]`) and are managed
-only via `GET/PUT /api/projects/{id}/timeline`. When a project has a saved timeline, render uses
-`render_timeline()` (segments in saved order, cuts subtracted and zoom/stock applied within them);
-otherwise it falls back to `render_with_edits()` on the original timeline.
+`SUPPORTED_EDIT_TYPES` (`cut`, `zoom`, `insert_stock_footage`, `diagram`, `captions`). Timeline
+segments — the ordered, possibly rearranged source ranges built in the frontend's `Timeline`
+component — are stored as `EditOperation` rows of `type="timeline_segment"` (order in
+`details["position"]`) and are managed only via `GET/PUT /api/projects/{id}/timeline`. When a
+project has a saved timeline, render uses `render_timeline()` (segments in saved order, cuts
+subtracted and zoom/stock applied within them); otherwise it falls back to `render_with_edits()`
+on the original timeline. When the project has an enabled `captions` edit, MoviePy renders to an
+intermediate `precaption_*` file and `_burn_project_captions()` runs as a final pass: words come
+from the edit's `details["words"]` (else the source is re-transcribed), get filtered to the edit's
+span, remapped from source to output time (`captions/remap.py` mirrors the cut/timeline
+semantics), and burned onto the final file. Caption `details` also carry `style` (validated
+against `STYLE_PRESETS`, listed at `GET /api/captions/styles`) and `max_words_per_line`.
+
+### Rendering (async job + progress)
+
+Rendering can take minutes, so it is **asynchronous**: `POST /api/projects/{id}/render`
+validates the project/media/source file, then returns `{job_id, status}` immediately and runs
+the work in a `BackgroundTasks` worker. Poll `GET /api/render/status/{job_id}` for
+`{status, progress, output_url, filename, applied_edits, error}`; `progress` is a 0.0–1.0
+fraction and `output_url` is populated only once `status == "done"`. Failures are recorded on
+the job as `status="error"` rather than raised from the start request.
+
+- `video_cutter/jobs.py` is the thread-safe **in-memory** job registry (`create_job` /
+  `get_job` / `update_job`), mirroring `youtube/jobs.py`. Jobs are lost on restart.
+- The worker itself is `_run_render_job` / `_execute_render` in `app.py` (it needs the route
+  layer's edit-resolution helpers). It opens its own `Session` on the engine handed to it as
+  `bind` — taken from the request session's `get_bind()`, which keeps tests that swap in an
+  in-memory engine via the `get_session` override working transparently.
+- Progress comes from MoviePy: `cut.py`'s `_RenderProgressLogger` is a `proglog` logger passed
+  as `logger=` to `write_videofile`. It tracks the **video** bar (`frame_index` on MoviePy 2.x,
+  `t` on 1.x) and deliberately ignores the audio `chunk` bar, which completes first and would
+  otherwise send progress back to zero. `render_with_edits` / `render_timeline` take an
+  `on_progress` callback; when captions are enabled the encode is scaled to 0–0.9 to leave room
+  for the caption burn pass.
+- Frontend: `App.jsx` starts the job and polls every `RENDER_POLL_INTERVAL_MS`, keeping the
+  interval id in `renderPollRef` (cleared on done/error/unmount) and driving the
+  `.render-progress` bar on the render page.
 
 ### Filesystem conventions
 
@@ -161,6 +202,13 @@ transcript in parallel → `SilenceTool` detects pauses → user confirms cuts (
 `EditOperation`s) → `renderProject` produces the final file. Key components: `VideoPlayer/`
 (with `WaveformProgress` overlaying cut markers), `TranscriptPanel/`, `EditorTools/SilenceTool`,
 `Upload/VideoUpload`. CORS in `app.py` is allow-listed to the Vite/CRA dev ports.
+
+Burned-in captions UI: the "Captions" side-panel tab hosts `EditorTools/CaptionsPanel` (preset
+gallery from `GET /api/captions/styles`, words-per-line, save/toggle/delete of the project's
+single `captions` edit — full-video span, transcript words in `metadata.words`). The live
+preview is `VideoPlayer/CaptionOverlay`, a CSS approximation of the libass burn driven by
+`utils/captionPages.js`, which mirrors the backend's page grouping (`captions/layout.py`) —
+keep the two in sync. Note `EditorTools/CaptionTool` is the unrelated caption-*removal* tool.
 
 ## Conventions (from AGENTS.md)
 

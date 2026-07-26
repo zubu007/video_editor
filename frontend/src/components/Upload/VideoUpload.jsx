@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { isVideoFile, formatFileSize, createBlobURL } from '../../utils/videoUtils';
 import styles from './VideoUpload.module.css';
 
-function VideoUpload({ onVideoSelect, onYouTubeImport }) {
+function VideoUpload({ onVideoSelect, onYouTubeImport, youtubeOnly = false }) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState(null);
@@ -103,6 +103,7 @@ function VideoUpload({ onVideoSelect, onYouTubeImport }) {
 
   return (
     <div className={styles.uploadContainer}>
+      {!youtubeOnly && (
       <div
         className={`${styles.dropZone} ${isDragging ? styles.dragging : ''}`}
         onDragEnter={handleDragEnter}
@@ -143,10 +144,13 @@ function VideoUpload({ onVideoSelect, onYouTubeImport }) {
           </div>
         )}
       </div>
+      )}
 
       <div className={styles.youtubeSection}>
         <label htmlFor="youtube-url" className={styles.youtubeLabel}>
-          Or paste a YouTube video link to download and edit
+          {youtubeOnly
+            ? 'Paste a YouTube video link to download and edit'
+            : 'Or paste a YouTube video link to download and edit'}
         </label>
         <div className={styles.youtubeRow}>
           <input

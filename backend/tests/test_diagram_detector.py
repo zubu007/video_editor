@@ -3,10 +3,12 @@ from unittest.mock import Mock, patch
 
 from backend.features.diagram.detector import DiagramDetectorLLM, suggest_diagrams
 from backend.features.diagram.schema import (
+    DEFAULT_DIAGRAM_LAYOUT,
     DEFAULT_DIAGRAM_TYPE,
     MAX_LABEL_LENGTH,
     MAX_NODES,
     MIN_DURATION_SECONDS,
+    normalize_layout,
     validate_graph,
     validate_suggestion,
     validate_suggestions,
@@ -405,6 +407,19 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         mock_llm_class.assert_called_once_with(api_key="test_key", model="some-model")
         mock_instance.suggest_diagrams.assert_called_once_with(transcript, "")
         self.assertEqual(result, [])
+
+
+class TestNormalizeLayout(unittest.TestCase):
+
+    def test_accepts_supported_layouts(self):
+        self.assertEqual(normalize_layout("portrait"), "portrait")
+        self.assertEqual(normalize_layout("landscape"), "landscape")
+        self.assertEqual(normalize_layout(" Portrait "), "portrait")
+
+    def test_unknown_values_fall_back_to_default(self):
+        self.assertEqual(normalize_layout("square"), DEFAULT_DIAGRAM_LAYOUT)
+        self.assertEqual(normalize_layout(None), DEFAULT_DIAGRAM_LAYOUT)
+        self.assertEqual(normalize_layout(""), DEFAULT_DIAGRAM_LAYOUT)
 
 
 if __name__ == "__main__":

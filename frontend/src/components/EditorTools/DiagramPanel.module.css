@@ -151,9 +151,45 @@
   color: var(--muted);
 }
 
+.layoutToggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.layoutButton,
+.layoutButtonActive {
+  border: 0;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 9px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.layoutButtonActive {
+  background: var(--primary);
+  color: white;
+  cursor: default;
+}
+
+.layoutButton:hover:not(:disabled) {
+  color: var(--primary);
+}
+
+.layoutButton:disabled,
+.layoutButtonActive:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* max-height keeps portrait previews card-sized; the video element keeps its
+   own aspect ratio within both limits. */
 .previewPlayer {
-  width: 100%;
-  max-width: 420px;
+  max-width: min(100%, 420px);
+  max-height: 400px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: #0f172a;

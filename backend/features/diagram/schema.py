@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 DIAGRAM_TYPES = ("flowchart", "timeline", "comparison", "cycle")
 DEFAULT_DIAGRAM_TYPE = "flowchart"
 
+DIAGRAM_LAYOUTS = ("landscape", "portrait")
+DEFAULT_DIAGRAM_LAYOUT = "landscape"
+
 MIN_NODES = 2
 MAX_NODES = 10
 MAX_EDGES = 15
@@ -38,6 +41,28 @@ def _clean_label(value: Any, max_length: int = MAX_LABEL_LENGTH) -> str:
     if len(text) > max_length:
         text = text[: max_length - 1].rstrip() + "…"
     return text
+
+
+def normalize_layout(value: Any) -> str:
+    """Normalizes a requested diagram layout to a supported value.
+
+    Args:
+        value: Raw layout value (user- or client-provided).
+
+    Returns:
+        str: One of DIAGRAM_LAYOUTS; unknown values fall back to
+            DEFAULT_DIAGRAM_LAYOUT with a warning.
+    """
+    layout = str(value or "").strip().lower()
+    if layout not in DIAGRAM_LAYOUTS:
+        if layout:
+            logger.warning(
+                "Unknown diagram layout %r, falling back to %r",
+                layout,
+                DEFAULT_DIAGRAM_LAYOUT,
+            )
+        return DEFAULT_DIAGRAM_LAYOUT
+    return layout
 
 
 def _parse_reveal_at(value: Any) -> float | None:

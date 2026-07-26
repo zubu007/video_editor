@@ -1,10 +1,11 @@
-import React, { forwardRef, useImperativeHandle } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
 import VideoControls from './VideoControls';
+import CaptionOverlay from './CaptionOverlay';
 import useKeyboardControls from '../../hooks/useKeyboardControls';
 import useVideoPlayer from '../../hooks/useVideoPlayer';
 import styles from './VideoPlayer.module.css';
 
-const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [] }, ref) => {
+const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [], onAspectRatioChange, captionPreview = null }, ref) => {
   const {
     videoRef,
     wrapperRef,
@@ -21,6 +22,7 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
     isMuted,
     isFullscreen,
     error,
+    aspectRatio,
   } = state;
 
   useKeyboardControls({
@@ -30,6 +32,14 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
     volume,
     controls,
   });
+
+  // Let the parent react to the source orientation (e.g. default new diagram
+  // overlays to portrait for portrait videos).
+  useEffect(() => {
+    if (aspectRatio && onAspectRatioChange) {
+      onAspectRatioChange(aspectRatio);
+    }
+  }, [aspectRatio, onAspectRatioChange]);
 
   // Expose seek method to parent component via ref
   useImperativeHandle(ref, () => ({
@@ -43,7 +53,7 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
 
   if (!src) {
     return (
-      <div className={styles.videoPlayerContainer}>
+      <div className={styles.placeholderBox}>
         <div className={styles.placeholder}>
           <svg width="64" height="64" viewBox="0 0 24 24" fill="currentColor">
             <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
@@ -56,28 +66,40 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
 
   return (
     <div ref={wrapperRef} className={styles.playerWrapper}>
-      <div
-        className={styles.videoPlayerContainer}
-        onClick={controls.togglePlay}
-      >
-        <video
-          ref={videoRef}
-          className={styles.video}
-          src={src}
-          autoPlay={autoPlay}
-        />
+      <div className={styles.stage}>
+        <div
+          className={styles.videoPlayerContainer}
+          style={aspectRatio ? { '--video-aspect': aspectRatio } : undefined}
+          onClick={controls.togglePlay}
+        >
+          <video
+            ref={videoRef}
+            className={styles.video}
+            src={src}
+            autoPlay={autoPlay}
+          />
 
-        {buffering && (
-          <div className={styles.bufferingSpinner}>
-            <div className={styles.spinner} />
-          </div>
-        )}
+          {captionPreview && (
+            <CaptionOverlay
+              words={captionPreview.words}
+              style={captionPreview.style}
+              wordsPerLine={captionPreview.wordsPerLine}
+              currentTime={currentTime}
+            />
+          )}
 
-        {error && (
-          <div className={styles.error}>
-            <p>{error}</p>
-          </div>
-        )}
+          {buffering && (
+            <div className={styles.bufferingSpinner}>
+              <div className={styles.spinner} />
+            </div>
+          )}
+
+          {error && (
+            <div className={styles.error}>
+              <p>{error}</p>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className={styles.controlsSection}>

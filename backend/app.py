@@ -33,6 +33,7 @@ from sqlmodel import Session, select
 
 from backend.features.audio.extract import get_waveform_data_from_file_id
 from backend.features.audio_pause.detect import (
+    apply_pause_padding,
     detect_audio_pauses,
     get_total_silence_duration,
     merge_nearby_pauses,
@@ -43,6 +44,14 @@ from backend.features.caption_removal.jobs import (
     run_caption_removal_job,
 )
 from backend.features.caption_removal.remove import DEFAULT_MODE, use_gpu_from_env
+from backend.features.captions import (
+    DEFAULT_STYLE as DEFAULT_CAPTION_STYLE,
+    STYLE_PRESETS as CAPTION_STYLE_PRESETS,
+    add_captions,
+    output_intervals,
+    remap_words,
+    video_duration,
+)
 from backend.features.youtube.jobs import (
     create_job as create_download_job,
     get_job as get_download_job,
@@ -55,7 +64,7 @@ from backend.features.assistant.chat import (
 from backend.features.assistant.tools import ToolContext
 from backend.features.diagram.detector import suggest_diagrams
 from backend.features.diagram.renderer import get_or_render_overlay
-from backend.features.diagram.schema import validate_graph
+from backend.features.diagram.schema import normalize_layout, validate_graph
 from backend.features.editing_plan.feature_registry import (
     clamp_stock_footage_end,
     normalize_stock_media_type,
@@ -85,6 +94,11 @@ from backend.features.video_cutter.cut import (
     cut_filler_words,
     render_timeline,
     render_with_edits,
+)
+from backend.features.video_cutter.jobs import (
+    create_job as create_render_job,
+    get_job as get_render_job,
+    update_job as update_render_job,
 )
 from backend.storage.database import (
     EditingPlan,
@@ -149,8 +163,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 # Edit operation types that can be persisted and rendered for a project.
 # "diagram" overlays are rendered with Manim (transparent .mov) and composited
-# over the spans they cover at project render time.
-SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage", "diagram"}
+# over the spans they cover at project render time. "captions" burns
+# shorts-style word captions over the spans it covers as a final ffmpeg pass
+# after the MoviePy render.
+SUPPORTED_EDIT_TYPES = {"cut", "zoom", "insert_stock_footage", "diagram", "captions"}
 
 # Timeline segments are stored as EditOperation rows of this type, ordered by
 # details["position"]. They are managed only through the /timeline endpoints,
@@ -293,6 +309,17 @@ class DiagramRenderRequest(BaseModel):
     end: float = Field(..., description="Segment end in seconds")
     graph: dict = Field(
         ..., description="Graph spec with nodes, edges and reveal_order"
+    )
+    background: Optional[str] = Field(
+        None,
+        description=(
+            "Background of the rendered clip: 'transparent' or omitted for the "
+            "default, or a solid #rrggbb color"
+        ),
+    )
+    layout: str = Field(
+        "landscape",
+        description="Orientation of the rendered clip: landscape or portrait",
     )
 
 
@@ -452,6 +479,52 @@ class RenderResponse(BaseModel):
     output_url: str
     filename: str
     applied_edits: int
+
+
+class RenderStartResponse(BaseModel):
+    """Response returned when a background render job is started."""
+
+    job_id: str
+    status: str
+
+
+class RenderStatusResponse(BaseModel):
+    """Status of a background render job, with the result once done."""
+
+    job_id: str
+    status: str
+    progress: float = Field(
+        0.0, ge=0.0, le=1.0, description="Render completion as a 0.0–1.0 fraction."
+    )
+    output_url: Optional[str] = None
+    filename: Optional[str] = None
+    applied_edits: Optional[int] = None
+    error: Optional[str] = None
+
+
+class CaptionStylePresetResponse(BaseModel):
+    """One caption style preset, with the visual details a UI preview needs."""
+
+    name: str
+    font_family: str
+    font_scale: float
+    text_colour: str
+    highlight_colour: Optional[str] = None
+    outline_colour: str
+    outline_scale: float
+    shadow_scale: float
+    margin_v_scale: float
+    word_colours: list[str] = Field(default_factory=list)
+    uppercase: bool
+    pop_scale: Optional[int] = None
+    max_words_per_line: int
+
+
+class CaptionStylesResponse(BaseModel):
+    """Response model listing the available caption style presets."""
+
+    styles: list[CaptionStylePresetResponse]
+    default_style: str
 
 
 class EditingPlanSaveRequest(BaseModel):
@@ -1049,6 +1122,19 @@ def validate_cut_range(start: float, end: float) -> None:
         )
 
 
+def validate_captions_metadata(edit_type: str, metadata: dict | None) -> None:
+    """Reject a captions edit that names an unknown style preset."""
+    if edit_type != "captions":
+        return
+    style = (metadata or {}).get("style")
+    if style is not None and style not in CAPTION_STYLE_PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown caption style '{style}'. "
+            f"Available styles: {', '.join(sorted(CAPTION_STYLE_PRESETS))}",
+        )
+
+
 def ensure_project(session: Session, project_id: str) -> Project:
     """Return a project or raise a 404 response."""
     project = get_project(session, project_id)
@@ -1209,8 +1295,12 @@ async def get_audio_pauses(
     silence_threshold: int = -40,
     seek_step: int = 10,
     merge_gap: Optional[float] = 0.5,
+    padding: float = 0.1,
 ):
     """Detect silence/pause ranges for a previously uploaded video."""
+    if padding < 0:
+        raise HTTPException(status_code=400, detail="padding must be >= 0")
+
     try:
         video_path = find_uploaded_video(file_id)
         pauses = detect_audio_pauses(
@@ -1223,6 +1313,9 @@ async def get_audio_pauses(
         if merge_gap is not None:
             pauses = merge_nearby_pauses(pauses, max_gap=merge_gap)
 
+        # Leave a cushion at each edge so cuts don't land flush against speech.
+        pauses = apply_pause_padding(pauses, padding=padding)
+
         return AudioPausesResponse(
             pauses=pauses,
             count=len(pauses),
@@ -1232,6 +1325,7 @@ async def get_audio_pauses(
                 "silence_threshold": silence_threshold,
                 "seek_step": seek_step,
                 "merge_gap": merge_gap,
+                "padding": padding,
             },
         )
     except FileNotFoundError as e:
@@ -1303,6 +1397,7 @@ async def create_project_edits_bulk(
                 detail=f"Unsupported edit type '{edit_request.type}'. "
                 f"Supported types: {', '.join(sorted(SUPPORTED_EDIT_TYPES))}",
             )
+        validate_captions_metadata(edit_request.type, edit_request.metadata)
 
         edit = EditOperation(
             project_id=project_id,
@@ -1351,6 +1446,7 @@ async def update_project_edit(
     if request.enabled is not None:
         edit.enabled = request.enabled
     if request.metadata is not None:
+        validate_captions_metadata(edit.type, request.metadata)
         edit.details = request.metadata
 
     edit.updated_at = utc_now()
@@ -1456,12 +1552,70 @@ async def save_project_timeline(
     return _timeline_response(created)
 
 
-@app.post("/api/projects/{project_id}/render", response_model=RenderResponse)
+def _burn_project_captions(
+    source_path: Path,
+    rendered_path: Path,
+    output_path: Path,
+    captions_edits: list[EditOperation],
+    cut_ranges: list,
+    timeline_rows: list[EditOperation],
+) -> None:
+    """Burn word captions onto a rendered project video.
+
+    Words come from the first captions edit's saved ``details["words"]``
+    (falling back to transcribing the source), are filtered to the spans the
+    captions edits cover, and are remapped from source time onto the rendered
+    output's timeline before burning. The style also comes from the first
+    captions edit. When every captioned word was cut away, the rendered video
+    is kept as-is.
+    """
+    details = captions_edits[0].details or {}
+    words = details.get("words") or extract_transcript_as_words(
+        str(source_path), "base"
+    )
+
+    spans = [(edit.start, edit.end) for edit in captions_edits]
+    covered = [
+        word
+        for word in words
+        if any(
+            start <= (float(word["start"]) + float(word["end"])) / 2.0 < end
+            for start, end in spans
+        )
+    ]
+
+    segments = [{"start": row.start, "end": row.end} for row in timeline_rows]
+    intervals = output_intervals(
+        video_duration(source_path), cut_ranges, segments or None
+    )
+    remapped = remap_words(covered, intervals)
+    if not remapped:
+        logger.warning("All captioned words were cut; rendering without captions")
+        rendered_path.replace(output_path)
+        return
+
+    add_captions(
+        rendered_path,
+        remapped,
+        output_path,
+        style=details.get("style", DEFAULT_CAPTION_STYLE),
+        max_words_per_line=details.get("max_words_per_line"),
+    )
+    rendered_path.unlink(missing_ok=True)
+
+
+@app.post("/api/projects/{project_id}/render", response_model=RenderStartResponse)
 async def render_project(
     project_id: str,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
-    """Render a project by applying enabled cut edits."""
+    """Start a background render of a project's enabled edits.
+
+    Validates that the project, its media asset, and the source file all exist so
+    the client gets immediate feedback, then runs the encode in a worker thread.
+    Poll ``/api/render/status/{job_id}`` for progress and the final download URL.
+    """
     ensure_project(session, project_id)
 
     media_asset = session.exec(
@@ -1473,9 +1627,69 @@ async def render_project(
         raise HTTPException(status_code=404, detail="Project has no media asset")
 
     try:
-        video_path = find_uploaded_video(media_asset.file_id)
+        find_uploaded_video(media_asset.file_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    job = create_render_job(project_id)
+    # Hand the worker the engine backing this request's session so it can open its
+    # own session on the same database (the request's session is closed by the time
+    # the background task runs). Using the request's bind keeps tests, which swap in
+    # an in-memory engine via the get_session override, working transparently.
+    background_tasks.add_task(
+        _run_render_job, job.job_id, project_id, session.get_bind()
+    )
+    logger.info("Started render job %s for project %s", job.job_id, project_id)
+    return RenderStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get("/api/render/status/{job_id}", response_model=RenderStatusResponse)
+async def get_render_status(job_id: str):
+    """Return the status, progress, and (once done) result of a render job."""
+    job = get_render_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found")
+
+    return RenderStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        output_url=job.output_url,
+        filename=job.filename,
+        applied_edits=job.applied_edits,
+        error=job.error,
+    )
+
+
+def _run_render_job(job_id: str, project_id: str, bind: Any) -> None:
+    """Render a project in a background worker thread, updating job progress.
+
+    Opens its own database session on ``bind`` (the engine from the originating
+    request, since that request's session is gone by the time this runs), resolves
+    the enabled edits into concrete render inputs, encodes the video while
+    forwarding frame progress to the job, and records the result or any error on
+    the job for the poller.
+    """
+    update_render_job(job_id, status="running", progress=0.0)
+    try:
+        with Session(bind) as session:
+            _execute_render(job_id, project_id, session)
+    except Exception as e:  # noqa: BLE001 - record any failure for the poller
+        logger.error("Render job %s failed: %s", job_id, e)
+        update_render_job(job_id, status="error", error=str(e))
+
+
+def _execute_render(job_id: str, project_id: str, session: Session) -> None:
+    """Resolve a project's edits and encode the final video (see _run_render_job)."""
+    media_asset = session.exec(
+        select(MediaAsset)
+        .where(MediaAsset.project_id == project_id)
+        .order_by(MediaAsset.created_at)
+    ).first()
+    if not media_asset:
+        raise FileNotFoundError("Project has no media asset")
+
+    video_path = find_uploaded_video(media_asset.file_id)
 
     edits = session.exec(
         select(EditOperation)
@@ -1557,16 +1771,21 @@ async def render_project(
             continue
         details = edit.details or {}
         try:
+            background = _diagram_background(details.get("background"))
             spec = _diagram_spec(
                 diagram_type=details.get("diagram_type", "flowchart"),
                 title=details.get("title", ""),
                 duration=edit.end - edit.start,
                 graph=details.get("graph") or {},
+                background=background,
+                layout=details.get("layout", "landscape"),
             )
+            # A solid background renders opaque (covers the frame); the
+            # default renders with alpha so the video shows through.
             overlay_path, _ = get_or_render_overlay(
                 spec,
                 OUTPUT_DIR / "diagram_overlays",
-                transparent=True,
+                transparent=background is None,
                 quality="medium",
             )
         except (ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
@@ -1583,42 +1802,73 @@ async def render_project(
         key=lambda row: (row.details or {}).get("position", 0),
     )
 
+    captions_edits = [edit for edit in edits if edit.type == "captions"]
+
     output_filename = f"rendered_{project_id}_{uuid.uuid4().hex[:8]}{video_path.suffix}"
     output_path = OUTPUT_DIR / output_filename
+    # Captions burn as a separate ffmpeg pass over the MoviePy render, so with
+    # captions the MoviePy output is an intermediate file.
+    render_target = (
+        OUTPUT_DIR / f"precaption_{output_filename}" if captions_edits else output_path
+    )
 
-    try:
-        if timeline_rows:
-            render_timeline(
-                str(video_path),
-                [{"start": row.start, "end": row.end} for row in timeline_rows],
-                str(output_path),
-                cut_ranges,
-                zoom_ranges,
-                stock_footage_ranges,
-                diagram_ranges,
-            )
-        else:
-            render_with_edits(
-                str(video_path),
-                cut_ranges,
-                zoom_ranges,
-                str(output_path),
-                stock_footage_ranges,
-                diagram_ranges,
-            )
-    except Exception as e:
-        logger.error(f"Error rendering project: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # The MoviePy encode drives the progress bar. When a caption burn pass follows,
+    # reserve the top slice of the bar for it so the user still sees movement while
+    # ffmpeg re-encodes with the captions layered on.
+    encode_scale = 0.9 if captions_edits else 1.0
 
-    return RenderResponse(
-        output_url=f"/api/renders/{output_filename}",
-        filename=output_filename,
-        applied_edits=len(cut_ranges)
+    def on_progress(fraction: float) -> None:
+        update_render_job(job_id, progress=round(fraction * encode_scale, 4))
+
+    if timeline_rows:
+        render_timeline(
+            str(video_path),
+            [{"start": row.start, "end": row.end} for row in timeline_rows],
+            str(render_target),
+            cut_ranges,
+            zoom_ranges,
+            stock_footage_ranges,
+            diagram_ranges,
+            on_progress=on_progress,
+        )
+    else:
+        render_with_edits(
+            str(video_path),
+            cut_ranges,
+            zoom_ranges,
+            str(render_target),
+            stock_footage_ranges,
+            diagram_ranges,
+            on_progress=on_progress,
+        )
+    if captions_edits:
+        update_render_job(job_id, progress=encode_scale)
+        _burn_project_captions(
+            video_path,
+            render_target,
+            output_path,
+            captions_edits,
+            cut_ranges,
+            timeline_rows,
+        )
+
+    applied_edits = (
+        len(cut_ranges)
         + len(zoom_ranges)
         + len(stock_footage_ranges)
         + len(diagram_ranges)
-        + len(timeline_rows),
+        + len(timeline_rows)
+        + len(captions_edits)
     )
+    update_render_job(
+        job_id,
+        status="done",
+        progress=1.0,
+        output_url=f"/api/renders/{output_filename}",
+        filename=output_filename,
+        applied_edits=applied_edits,
+    )
+    logger.info("Render job %s completed (%s)", job_id, output_filename)
 
 
 def _editing_plan_to_response(plan: EditingPlan) -> EditingPlanRecordResponse:
@@ -1860,6 +2110,37 @@ async def get_rendered_video(filename: str):
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Rendered video not found")
     return file_response_for_video(output_path, filename)
+
+
+# ============================================================================
+# Captions Endpoints
+# ============================================================================
+
+
+@app.get("/api/captions/styles", response_model=CaptionStylesResponse)
+async def list_caption_styles():
+    """List the caption style presets available for burned-in captions."""
+    return CaptionStylesResponse(
+        styles=[
+            CaptionStylePresetResponse(
+                name=style.name,
+                font_family=style.font_family,
+                font_scale=style.font_scale,
+                text_colour=style.text_colour,
+                highlight_colour=style.highlight_colour,
+                outline_colour=style.outline_colour,
+                outline_scale=style.outline_scale,
+                shadow_scale=style.shadow_scale,
+                margin_v_scale=style.margin_v_scale,
+                word_colours=list(style.word_colours),
+                uppercase=style.uppercase,
+                pop_scale=style.pop_scale,
+                max_words_per_line=style.max_words_per_line,
+            )
+            for style in CAPTION_STYLE_PRESETS.values()
+        ],
+        default_style=DEFAULT_CAPTION_STYLE,
+    )
 
 
 # ============================================================================
@@ -2471,7 +2752,39 @@ async def generate_editing_plan_by_id(
 # ============================================================================
 
 
-def _diagram_spec(diagram_type: str, title: str, duration: float, graph: dict) -> dict:
+DIAGRAM_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _diagram_background(value: Any) -> str | None:
+    """Normalize a diagram edit's background choice.
+
+    Args:
+        value: The raw ``background`` value from the edit metadata — absent,
+            ``"transparent"``, or a hex color like ``"#0f172a"``.
+
+    Returns:
+        str | None: A lowercase ``#rrggbb`` color, or None for transparent.
+
+    Raises:
+        ValueError: If the value is neither "transparent" nor a hex color.
+    """
+    if value is None or value == "" or value == "transparent":
+        return None
+    if isinstance(value, str) and DIAGRAM_HEX_COLOR_RE.match(value):
+        return value.lower()
+    raise ValueError(
+        f"diagram background must be 'transparent' or a #rrggbb color, got {value!r}"
+    )
+
+
+def _diagram_spec(
+    diagram_type: str,
+    title: str,
+    duration: float,
+    graph: dict,
+    background: str | None = None,
+    layout: str = "landscape",
+) -> dict:
     """Build a validated, render-ready diagram spec.
 
     Args:
@@ -2479,6 +2792,10 @@ def _diagram_spec(diagram_type: str, title: str, duration: float, graph: dict) -
         title: Short on-screen title.
         duration: Overlay duration in seconds (the edit's end - start).
         graph: Raw graph dict (nodes/edges/reveal_order).
+        background: Solid background color (``#rrggbb``), or None for the
+            default (transparent overlay at final render, dark preview).
+        layout: Frame orientation, "landscape" or "portrait" (unknown values
+            fall back to landscape).
 
     Returns:
         dict: Spec consumed by the Manim scene template.
@@ -2494,12 +2811,16 @@ def _diagram_spec(diagram_type: str, title: str, duration: float, graph: dict) -
     for node in validated["nodes"]:
         if "reveal_at" in node:
             node["reveal_at"] = min(node["reveal_at"], max(0.0, duration - 1.0))
-    return {
+    spec = {
         "diagram_type": diagram_type,
         "title": title or "",
         "duration": duration,
+        "layout": normalize_layout(layout),
         "graph": validated,
     }
+    if background:
+        spec["background"] = background
+    return spec
 
 
 @app.post("/api/diagrams/render", response_model=DiagramRenderResponse)
@@ -2518,6 +2839,8 @@ def render_diagram_preview(request: DiagramRenderRequest):
             title=request.title,
             duration=request.end - request.start,
             graph=request.graph,
+            background=_diagram_background(request.background),
+            layout=request.layout,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2600,6 +2923,8 @@ def _describe_edit_details(edit: EditOperation) -> str:
             parts.append(details["diagram_type"])
         if details.get("title"):
             parts.append(f"'{details['title']}'")
+        if details.get("layout") == "portrait":
+            parts.append("portrait")
     return f" ({', '.join(parts)})" if parts else ""
 
 
@@ -2785,6 +3110,21 @@ async def get_stock_footage_file(filename: str):
         media_type=guessed_type or "video/mp4",
         filename=filename,
     )
+
+
+# ============================================================================
+# Landing Page
+# ============================================================================
+
+LANDING_PAGE_PATH = Path(__file__).parent / "static" / "landing_page.html"
+
+
+@app.get("/landing_page", include_in_schema=False)
+async def landing_page() -> FileResponse:
+    """Serve the public marketing landing page."""
+    if not LANDING_PAGE_PATH.exists():
+        raise HTTPException(status_code=404, detail="Landing page not found")
+    return FileResponse(LANDING_PAGE_PATH, media_type="text/html")
 
 
 # ============================================================================

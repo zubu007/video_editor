@@ -9,8 +9,7 @@
 }
 
 .header,
-.sectionHeader,
-.footer {
+.sectionHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -90,16 +89,14 @@
 }
 
 .primaryButton,
-.secondaryButton,
-.renderButton {
+.secondaryButton {
   border: 0;
   border-radius: 6px;
   cursor: pointer;
   font-weight: 600;
 }
 
-.primaryButton,
-.renderButton {
+.primaryButton {
   background: #2563eb;
   background: var(--primary);
   color: white;
@@ -114,8 +111,7 @@
 }
 
 .primaryButton:disabled,
-.secondaryButton:disabled,
-.renderButton:disabled {
+.secondaryButton:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -136,13 +132,6 @@
 
 .dangerButton {
   color: #dc2626;
-}
-
-.renderLink {
-  color: #2563eb;
-  color: var(--primary);
-  font-size: 13px;
-  font-weight: 600;
 }
 
 .error {
