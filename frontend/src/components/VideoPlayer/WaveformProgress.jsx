@@ -2,7 +2,7 @@ import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { formatTime } from '../../utils/timeFormat';
 import styles from './WaveformProgress.module.css';
 
-function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformData, rangeMarkers = [] }) {
+function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformData, rangeMarkers = [], pointMarkers = [] }) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -186,6 +186,32 @@ function WaveformProgress({ currentTime, duration, onSeek, buffering, waveformDa
                 onSeek(marker.start);
               }}
             />
+          );
+        })}
+
+        {duration > 0 && pointMarkers.map((marker, index) => {
+          const left = Math.max(0, Math.min(100, (marker.time / duration) * 100));
+          const kindClass =
+            marker.kind === 'K'
+              ? styles.eventK
+              : marker.kind === 'D'
+                ? styles.eventD
+                : styles.eventA;
+
+          return (
+            <button
+              key={`${marker.kind}-${marker.time}-${index}`}
+              type="button"
+              className={`${styles.eventMarker} ${kindClass}`}
+              style={{ left: `${left}%` }}
+              title={`${marker.kind} at ${formatTime(marker.time)}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSeek(marker.time);
+              }}
+            >
+              <span className={styles.eventLabel}>{marker.kind}</span>
+            </button>
           );
         })}
 

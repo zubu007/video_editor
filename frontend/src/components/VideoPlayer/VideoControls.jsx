@@ -16,6 +16,7 @@ function VideoControls({
   buffering,
   waveformData,
   rangeMarkers,
+  pointMarkers,
   onPlayPause,
   onSeek,
   onVolumeChange,
@@ -32,6 +33,7 @@ function VideoControls({
         buffering={buffering}
         waveformData={waveformData}
         rangeMarkers={rangeMarkers}
+        pointMarkers={pointMarkers}
       />
       <TimeDisplay currentTime={currentTime} duration={duration} />
       <VolumeControl

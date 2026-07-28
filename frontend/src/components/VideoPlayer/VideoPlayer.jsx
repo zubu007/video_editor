@@ -6,7 +6,7 @@ import useKeyboardControls from '../../hooks/useKeyboardControls';
 import useVideoPlayer from '../../hooks/useVideoPlayer';
 import styles from './VideoPlayer.module.css';
 
-const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [], onAspectRatioChange, captionPreview = null, textCaptions = [] }, ref) => {
+const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, waveformData, rangeMarkers = [], pointMarkers = [], onAspectRatioChange, captionPreview = null, textCaptions = [] }, ref) => {
   const {
     videoRef,
     wrapperRef,
@@ -121,6 +121,7 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
           buffering={buffering}
           waveformData={waveformData}
           rangeMarkers={rangeMarkers}
+          pointMarkers={pointMarkers}
           onPlayPause={controls.togglePlay}
           onSeek={controls.seek}
           onVolumeChange={controls.setVolume}

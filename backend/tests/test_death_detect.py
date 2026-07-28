@@ -18,6 +18,7 @@ from backend.features.gaming.death_detect import (
     _colour_signature,
     _death_event_times,
     _match_slot,
+    _ocr_kda,
     _respawn_signal,
     _signal_runs,
     detect_death_intervals,
@@ -95,6 +96,23 @@ def test_signal_runs_drops_too_short_runs():
     times = list(range(5))
     signal = [0, 0.2, 0, 0, 0]  # single sample, below min_samples
     assert _signal_runs(times, signal, threshold=0.05, min_samples=2) == []
+
+
+def test_ocr_kda_rejects_dips_and_implausible_jumps(monkeypatch):
+    import pytesseract
+
+    # From a running (3, 1, 5): a dip below current, then a valid +1 assist, then
+    # an implausible assists jump (> +3 per sample). Only the middle read sticks.
+    reads = iter(["2/0/4", "3/1/6", "3/1/20"])
+    monkeypatch.setattr(pytesseract, "image_to_string", lambda *a, **k: next(reads))
+    img = np.zeros((20, 210, 3), np.uint8)
+
+    prev = _ocr_kda(img, (3, 1, 5))  # values can't decrease → rejected
+    assert prev == (3, 1, 5)
+    prev = _ocr_kda(img, prev)  # +1 assist → accepted
+    assert prev == (3, 1, 6)
+    prev = _ocr_kda(img, prev)  # +14 assists is noise → rejected
+    assert prev == (3, 1, 6)
 
 
 def test_death_event_times_finds_increments():

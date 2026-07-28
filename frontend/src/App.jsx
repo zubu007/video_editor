@@ -13,6 +13,7 @@ import EditsPanel from './components/EditorTools/EditsPanel';
 import StockFootagePanel from './components/EditorTools/StockFootagePanel';
 import DiagramPanel from './components/EditorTools/DiagramPanel';
 import DeathCutsPanel from './components/EditorTools/DeathCutsPanel';
+import HighlightsPanel from './components/EditorTools/HighlightsPanel';
 import ChatPanel from './components/Assistant/ChatPanel';
 import InspectorPanel from './components/Inspector/InspectorPanel';
 import SettingsModal from './components/Settings/SettingsModal';
@@ -43,6 +44,7 @@ import {
   getSlotPreview,
   startDeathDetection,
   getDeathDetectionStatus,
+  createHighlightClip,
 } from './services/api';
 import './App.css';
 
@@ -143,8 +145,20 @@ function App() {
   const [deathSlots, setDeathSlots] = useState([]);
   const [deathSelectedSlot, setDeathSelectedSlot] = useState(null);
   const [deathCutsSaved, setDeathCutsSaved] = useState(0);
+  // K/D/A event markers for the play bar (gaming mode), placed by the dedicated
+  // "Detect K/D/A markers" button.
+  const [gamingEvents, setGamingEvents] = useState([]);
+  const [markerStatus, setMarkerStatus] = useState('idle'); // idle|detecting|done|error
+  const [markerError, setMarkerError] = useState(null);
+  // "Highlights" tab: trim a quick clip between two source timestamps.
+  const [highlightStart, setHighlightStart] = useState('');
+  const [highlightEnd, setHighlightEnd] = useState('');
+  const [highlightStatus, setHighlightStatus] = useState('idle'); // idle|creating|done|error
+  const [highlightError, setHighlightError] = useState(null);
+  const [highlightResult, setHighlightResult] = useState(null);
   const videoPlayerRef = useRef(null);
   const deathPollRef = useRef(null);
+  const markerPollRef = useRef(null);
   // Holds the setInterval id for polling the active render job's status.
   const renderPollRef = useRef(null);
 
@@ -1481,6 +1495,59 @@ function App() {
   };
   useEffect(() => stopDeathPolling, []);
 
+  const stopMarkerPolling = () => {
+    if (markerPollRef.current) {
+      clearInterval(markerPollRef.current);
+      markerPollRef.current = null;
+    }
+  };
+  useEffect(() => stopMarkerPolling, []);
+
+  // Detect kills, deaths and assists in one scan and place their markers on the
+  // play bar (K/A from HUD OCR, D from the respawn-box signal). Reuses the
+  // death-detection endpoint with the K/D/A OCR pass enabled.
+  const handleDetectMarkers = async () => {
+    if (!fileId) return;
+
+    stopMarkerPolling();
+    setMarkerStatus('detecting');
+    setMarkerError(null);
+    setGamingEvents([]);
+    try {
+      const { job_id: jobId } = await startDeathDetection(fileId, {
+        team: deathTeam,
+        playerSlot: deathSelectedSlot,
+        detectKda: true,
+      });
+      markerPollRef.current = setInterval(async () => {
+        try {
+          const status = await getDeathDetectionStatus(jobId);
+          if (status.status === 'done') {
+            stopMarkerPolling();
+            setGamingEvents(status.events || []);
+            setMarkerStatus('done');
+            logActivity(
+              `Placed ${(status.events || []).length} K/D/A markers on the play bar.`
+            );
+          } else if (status.status === 'error') {
+            stopMarkerPolling();
+            setMarkerError(status.error || 'Marker detection failed.');
+            setMarkerStatus('error');
+          }
+        } catch (error) {
+          stopMarkerPolling();
+          console.error('Error polling marker detection:', error);
+          setMarkerError('Lost contact with the detection job.');
+          setMarkerStatus('error');
+        }
+      }, DEATH_POLL_INTERVAL_MS);
+    } catch (error) {
+      console.error('Error starting marker detection:', error);
+      setMarkerError('Could not start marker detection.');
+      setMarkerStatus('error');
+    }
+  };
+
   // Load the 5 team-portrait thumbnails so the user can correct the auto slot.
   const handleLoadDeathSlots = async () => {
     if (!fileId) return;
@@ -1577,6 +1644,40 @@ function App() {
     }
   };
 
+  // Copy the current playhead time into the highlight start/end field.
+  const handleSetHighlightToPlayhead = (which) => {
+    const value = String(Number(currentTime.toFixed(2)));
+    if (which === 'start') setHighlightStart(value);
+    else setHighlightEnd(value);
+  };
+
+  // Trim a quick clip between the start/end fields into a downloadable file.
+  const handleCreateHighlight = async () => {
+    if (!fileId) return;
+    const start = parseFloat(highlightStart);
+    const end = parseFloat(highlightEnd);
+    if (Number.isNaN(start) || Number.isNaN(end) || end <= start) {
+      setHighlightError('Enter a valid start and end (end must be after start).');
+      setHighlightStatus('error');
+      return;
+    }
+    setHighlightStatus('creating');
+    setHighlightError(null);
+    setHighlightResult(null);
+    try {
+      const clip = await createHighlightClip(fileId, start, end);
+      setHighlightResult(clip);
+      setHighlightStatus('done');
+      logActivity(`Created a ${clip.duration.toFixed(1)}s highlight clip.`);
+    } catch (error) {
+      console.error('Error creating highlight clip:', error);
+      setHighlightError(
+        error?.response?.data?.detail || 'Could not create the highlight clip.'
+      );
+      setHighlightStatus('error');
+    }
+  };
+
   const handleGoToRender = () => {
     setCurrentView('render');
   };
@@ -1636,6 +1737,15 @@ function App() {
     setDeathSlots([]);
     setDeathSelectedSlot(null);
     setDeathCutsSaved(0);
+    stopMarkerPolling();
+    setGamingEvents([]);
+    setMarkerStatus('idle');
+    setMarkerError(null);
+    setHighlightStart('');
+    setHighlightEnd('');
+    setHighlightStatus('idle');
+    setHighlightError(null);
+    setHighlightResult(null);
     setIsGaming(false);
     setActivePanel('tools');
     setCurrentView('editor');
@@ -1749,6 +1859,7 @@ function App() {
               onEnded={handleVideoEnded}
               waveformData={waveformData}
               rangeMarkers={rangeMarkers}
+              pointMarkers={isGaming ? gamingEvents : []}
               onAspectRatioChange={setVideoAspectRatio}
               captionPreview={captionPreview}
               textCaptions={savedTextCaptions}
@@ -1830,6 +1941,15 @@ function App() {
                   onClick={() => setActivePanel('deaths')}
                 >
                   Deaths
+                </button>
+              )}
+              {isGaming && (
+                <button
+                  type="button"
+                  className={activePanel === 'highlights' ? 'active' : ''}
+                  onClick={() => setActivePanel('highlights')}
+                >
+                  Highlights
                 </button>
               )}
               <button
@@ -1922,6 +2042,35 @@ function App() {
                   onSeek={handleSeek}
                   onAddCuts={handleAddDeathCuts}
                   savedCount={deathCutsSaved}
+                />
+              )}
+              {activePanel === 'highlights' && (
+                <HighlightsPanel
+                  hasVideo={Boolean(fileId)}
+                  currentTime={currentTime}
+                  start={highlightStart}
+                  end={highlightEnd}
+                  status={highlightStatus}
+                  error={highlightError}
+                  result={highlightResult}
+                  markerStatus={markerStatus}
+                  markerError={markerError}
+                  markerCount={gamingEvents.length}
+                  team={deathTeam}
+                  slots={deathSlots}
+                  selectedSlot={deathSelectedSlot}
+                  playerSlot={deathPlayerSlot}
+                  confidence={deathConfidence}
+                  slotsLoading={deathStatus === 'loading-slots'}
+                  slotError={deathStatus === 'error' ? deathError : null}
+                  onChangeTeam={setDeathTeam}
+                  onLoadSlots={handleLoadDeathSlots}
+                  onSelectSlot={handleSelectDeathSlot}
+                  onDetectMarkers={handleDetectMarkers}
+                  onChangeStart={setHighlightStart}
+                  onChangeEnd={setHighlightEnd}
+                  onSetToPlayhead={handleSetHighlightToPlayhead}
+                  onCreate={handleCreateHighlight}
                 />
               )}
               {activePanel === 'plan' && (
