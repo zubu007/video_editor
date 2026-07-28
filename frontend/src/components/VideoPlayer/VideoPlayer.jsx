@@ -24,6 +24,7 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
     isFullscreen,
     error,
     aspectRatio,
+    playbackRate,
   } = state;
 
   useKeyboardControls({
@@ -122,8 +123,10 @@ const VideoPlayer = forwardRef(({ src, onTimeUpdate, onEnded, autoPlay = false, 
           waveformData={waveformData}
           rangeMarkers={rangeMarkers}
           pointMarkers={pointMarkers}
+          playbackRate={playbackRate}
           onPlayPause={controls.togglePlay}
           onSeek={controls.seek}
+          onSpeedChange={controls.setPlaybackRate}
           onVolumeChange={controls.setVolume}
           onMuteToggle={controls.toggleMute}
           onFullscreenToggle={controls.toggleFullscreen}

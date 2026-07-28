@@ -16,6 +16,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [error, setError] = useState(null);
   // Width / height of the loaded video, so the player chrome can match the
   // source aspect ratio (portrait vs landscape) instead of assuming 16:9.
@@ -76,6 +77,16 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
     }
   }, []);
 
+  // `defaultPlaybackRate` is set too so the rate survives a source change:
+  // loading a new src resets `playbackRate` back to the default.
+  const setPlaybackRateLevel = useCallback((rate) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(rate) || rate <= 0) return;
+
+    video.defaultPlaybackRate = rate;
+    video.playbackRate = rate;
+  }, []);
+
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -118,6 +129,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
       setVolume(video.volume);
       setIsMuted(video.muted);
     };
+    const handleRateChange = () => setPlaybackRate(video.playbackRate);
     const handleWaiting = () => setBuffering(true);
     const handleCanPlay = () => setBuffering(false);
     const handleSeeking = () => setBuffering(true);
@@ -133,6 +145,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
     video.addEventListener('pause', handlePause);
     video.addEventListener('ended', handleEnded);
     video.addEventListener('volumechange', handleVolumeChange);
+    video.addEventListener('ratechange', handleRateChange);
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('seeking', handleSeeking);
@@ -146,6 +159,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('volumechange', handleVolumeChange);
+      video.removeEventListener('ratechange', handleRateChange);
       video.removeEventListener('waiting', handleWaiting);
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('seeking', handleSeeking);
@@ -185,6 +199,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
       isFullscreen,
       error,
       aspectRatio,
+      playbackRate,
     },
     controls: {
       play,
@@ -192,6 +207,7 @@ export default function useVideoPlayer({ onTimeUpdate, onEnded } = {}) {
       togglePlay,
       seek,
       setVolume: setVolumeLevel,
+      setPlaybackRate: setPlaybackRateLevel,
       toggleMute,
       toggleFullscreen,
     },

@@ -20,12 +20,8 @@ function VideoUpload({ onVideoSelect, onYouTubeImport, youtubeOnly = false }) {
       return;
     }
 
-    // Validate file size (max 500MB for client-side preview)
-    const maxSize = 500 * 1024 * 1024; // 500MB
-    if (file.size > maxSize) {
-      setError('File size exceeds 500MB limit');
-      return;
-    }
+    // No size cap: the backend streams uploads to disk and the preview below
+    // is a blob URL (disk-backed), so large 4K sources cost time, not memory.
 
     // Create blob URL for preview
     const blobUrl = createBlobURL(file);
@@ -131,7 +127,7 @@ function VideoUpload({ onVideoSelect, onYouTubeImport, youtubeOnly = false }) {
             Browse Files
           </button>
 
-          <p className={styles.hint}>Supported formats: MP4, WebM, MOV (max 500MB)</p>
+          <p className={styles.hint}>Supported formats: MP4, WebM, MOV</p>
         </div>
 
         {selectedFile && (

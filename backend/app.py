@@ -168,6 +168,9 @@ OUTPUT_DIR = Path("temp/outputs")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
+# Chunk size for streaming uploads to disk; keeps peak memory flat regardless
+# of how large the uploaded video is.
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 # Edit operation types that can be persisted and rendered for a project.
 # "diagram" overlays are rendered with Manim (transparent .mov) and composited
 # over the spans they cover at project render time. "captions" burns
@@ -883,10 +886,19 @@ class WaveformResponse(BaseModel):
 
 
 async def save_upload_file(upload_file: UploadFile, destination: Path) -> None:
-    """Save an uploaded file to disk."""
+    """Save an uploaded file to disk.
+
+    Copied in chunks rather than via a single ``read()``: uploads are whole
+    videos, and reading one into a single ``bytes`` object costs its full size
+    in resident memory (a 4K source is comfortably several GB).
+
+    Args:
+        upload_file: The incoming multipart file.
+        destination: Path to write the bytes to.
+    """
     async with aiofiles.open(destination, "wb") as f:
-        content = await upload_file.read()
-        await f.write(content)
+        while chunk := await upload_file.read(UPLOAD_CHUNK_SIZE):
+            await f.write(chunk)
 
 
 def temp_upload_path(filename: str) -> Path:

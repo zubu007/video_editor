@@ -2,6 +2,7 @@ import React from 'react';
 import PlaybackButton from './PlaybackButton';
 import WaveformProgress from './WaveformProgress';
 import TimeDisplay from './TimeDisplay';
+import SpeedControl from './SpeedControl';
 import VolumeControl from './VolumeControl';
 import FullscreenButton from './FullscreenButton';
 import styles from './VideoControls.module.css';
@@ -17,8 +18,10 @@ function VideoControls({
   waveformData,
   rangeMarkers,
   pointMarkers,
+  playbackRate,
   onPlayPause,
   onSeek,
+  onSpeedChange,
   onVolumeChange,
   onMuteToggle,
   onFullscreenToggle,
@@ -36,6 +39,7 @@ function VideoControls({
         pointMarkers={pointMarkers}
       />
       <TimeDisplay currentTime={currentTime} duration={duration} />
+      <SpeedControl playbackRate={playbackRate} onSpeedChange={onSpeedChange} />
       <VolumeControl
         volume={volume}
         isMuted={isMuted}
