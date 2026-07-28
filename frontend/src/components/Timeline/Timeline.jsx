@@ -13,6 +13,10 @@ const OVERLAY_LANES = [
 
 const MIN_OVERLAY_LENGTH = 0.2;
 
+// Horizontal zoom steps. 1 = the whole timeline fits the visible width; at
+// higher factors the lane content overflows and the track scrolls sideways.
+const ZOOM_LEVELS = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -106,7 +110,12 @@ function Timeline({
   // In-flight drag values for one overlay, applied over its stored values so
   // the clip follows the pointer before the change is persisted.
   const [overlayDraft, setOverlayDraft] = useState(null);
+  const [zoom, setZoom] = useState(1);
   const lanesRef = useRef(null);
+  const scrollerRef = useRef(null);
+  // Timeline-time to re-centre on after a zoom change, applied once the new
+  // content width has been laid out.
+  const zoomAnchorRef = useRef(null);
 
   const totalDuration = useMemo(
     () => segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0),
@@ -136,15 +145,69 @@ function Timeline({
     return null;
   }, [segments, offsets, currentTime]);
 
+  // Tick density follows the zoom: the visible window is totalDuration / zoom
+  // seconds wide, so ticks stay roughly evenly spaced on screen.
   const ticks = useMemo(() => {
     if (totalDuration <= 0) return [];
-    const interval = pickTickInterval(totalDuration);
+    const interval = pickTickInterval(totalDuration / zoom);
     const result = [];
     for (let t = 0; t <= totalDuration; t += interval) {
       result.push(t);
     }
     return result;
-  }, [totalDuration]);
+  }, [totalDuration, zoom]);
+
+  // Scroll so `timelineTime` sits in the middle of the visible window.
+  const centerOn = (timelineTime) => {
+    const scroller = scrollerRef.current;
+    if (!scroller || totalDuration <= 0) return;
+    const viewport = scroller.clientWidth;
+    const contentWidth = viewport * zoom;
+    const x = (timelineTime / totalDuration) * contentWidth;
+    scroller.scrollLeft = clamp(x - viewport / 2, 0, Math.max(contentWidth - viewport, 0));
+  };
+
+  const changeZoom = (direction) => {
+    const index = ZOOM_LEVELS.indexOf(zoom);
+    const nextIndex = clamp(
+      (index === -1 ? 0 : index) + direction,
+      0,
+      ZOOM_LEVELS.length - 1
+    );
+    if (ZOOM_LEVELS[nextIndex] === zoom) return;
+
+    const scroller = scrollerRef.current;
+    if (scroller && totalDuration > 0) {
+      // Keep the playhead put when it is on screen, otherwise the time
+      // currently in the middle of the window.
+      const viewport = scroller.clientWidth;
+      const centerTime =
+        ((scroller.scrollLeft + viewport / 2) / (viewport * zoom)) * totalDuration;
+      zoomAnchorRef.current = playheadTime ?? centerTime;
+    }
+    setZoom(ZOOM_LEVELS[nextIndex]);
+  };
+
+  // Re-centre after the zoomed lanes have been laid out at their new width.
+  useEffect(() => {
+    if (zoomAnchorRef.current === null) return;
+    centerOn(zoomAnchorRef.current);
+    zoomAnchorRef.current = null;
+  }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Follow the playhead while it plays past the edge of the visible window.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || zoom <= 1 || playheadTime === null || totalDuration <= 0) {
+      return;
+    }
+    const viewport = scroller.clientWidth;
+    const x = (playheadTime / totalDuration) * viewport * zoom;
+    const margin = viewport * 0.1;
+    if (x < scroller.scrollLeft + margin || x > scroller.scrollLeft + viewport - margin) {
+      centerOn(playheadTime);
+    }
+  }, [playheadTime, zoom, totalDuration]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const timelineToSource = (timelineTime) => {
     for (let i = 0; i < segments.length; i += 1) {
@@ -394,6 +457,42 @@ function Timeline({
           Reset
         </button>
 
+        <div className={styles.zoomGroup}>
+          <button
+            type="button"
+            className={styles.zoomButton}
+            onClick={() => changeZoom(-1)}
+            disabled={zoom === ZOOM_LEVELS[0]}
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <span className={styles.zoomLabel}>{zoom}×</span>
+          <button
+            type="button"
+            className={styles.zoomButton}
+            onClick={() => changeZoom(1)}
+            disabled={zoom === ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className={styles.toolButton}
+            onClick={() => {
+              zoomAnchorRef.current = null;
+              setZoom(1);
+            }}
+            disabled={zoom === 1}
+            title="Fit the whole timeline"
+          >
+            Fit
+          </button>
+        </div>
+
         <span className={styles.summary}>
           {segments.length} segment{segments.length === 1 ? '' : 's'} ·{' '}
           {formatTime(totalDuration)}
@@ -434,102 +533,109 @@ function Timeline({
           </div>
         </div>
 
-        <div className={styles.lanes} ref={lanesRef}>
-          <div className={styles.ruler} onClick={handleRulerClick}>
-            {ticks.map((tick) => (
+        <div className={styles.scroller} ref={scrollerRef}>
+          <div
+            className={styles.lanes}
+            ref={lanesRef}
+            style={{ width: `${zoom * 100}%` }}
+          >
+            <div className={styles.ruler} onClick={handleRulerClick}>
+              {ticks.map((tick) => (
+                <div
+                  key={tick}
+                  className={styles.tick}
+                  style={{ left: `${(tick / totalDuration) * 100}%` }}
+                >
+                  <span>{formatTime(tick)}</span>
+                </div>
+              ))}
+            </div>
+
+            {OVERLAY_LANES.map((lane) => (
               <div
-                key={tick}
-                className={styles.tick}
-                style={{ left: `${(tick / totalDuration) * 100}%` }}
+                key={lane.type}
+                className={styles.overlayLane}
+                onClick={() => onSelectOverlay?.(null)}
               >
-                <span>{formatTime(tick)}</span>
+                {overlays
+                  .filter((overlay) => overlay.type === lane.type)
+                  .map(renderOverlayClip)}
               </div>
             ))}
-          </div>
 
-          {OVERLAY_LANES.map((lane) => (
             <div
-              key={lane.type}
-              className={styles.overlayLane}
-              onClick={() => onSelectOverlay?.(null)}
+              className={styles.track}
+              onDrop={handleDrop}
+              onDragOver={(event) => {
+                if (dragIndex !== null) event.preventDefault();
+              }}
             >
-              {overlays
-                .filter((overlay) => overlay.type === lane.type)
-                .map(renderOverlayClip)}
+              {segments.map((segment, index) => {
+                const length = segment.end - segment.start;
+                const isSelected = segment.id === selectedSegmentId;
+                const classNames = [styles.segment];
+                if (isSelected) classNames.push(styles.selected);
+                if (index === dragIndex) classNames.push(styles.dragging);
+                if (dropIndex === index) classNames.push(styles.dropBefore);
+                if (dropIndex === index + 1 && index === segments.length - 1) {
+                  classNames.push(styles.dropAfter);
+                }
+
+                return (
+                  <div
+                    key={segment.id}
+                    className={classNames.join(' ')}
+                    style={{ width: `${(length / totalDuration) * 100}%` }}
+                    draggable
+                    onClick={(event) => handleSegmentClick(event, segment)}
+                    onDragStart={(event) => handleDragStart(event, index)}
+                    onDragOver={(event) => handleDragOver(event, index)}
+                    onDragEnd={handleDragEnd}
+                    title={`Source ${formatTime(segment.start)} – ${formatTime(segment.end)}`}
+                  >
+                    <SegmentWaveform
+                      waveformData={waveformData}
+                      duration={duration}
+                      start={segment.start}
+                      end={segment.end}
+                    />
+                    <span className={styles.segmentLabel}>
+                      {index + 1} · {formatTime(length)}
+                    </span>
+                    {isSelected && segments.length > 1 && (
+                      <button
+                        type="button"
+                        className={styles.segmentDelete}
+                        aria-label="Delete segment"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDeleteSegment(segment.id);
+                          onSelectSegment?.(null);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          ))}
 
-          <div
-            className={styles.track}
-            onDrop={handleDrop}
-            onDragOver={(event) => {
-              if (dragIndex !== null) event.preventDefault();
-            }}
-          >
-            {segments.map((segment, index) => {
-              const length = segment.end - segment.start;
-              const isSelected = segment.id === selectedSegmentId;
-              const classNames = [styles.segment];
-              if (isSelected) classNames.push(styles.selected);
-              if (index === dragIndex) classNames.push(styles.dragging);
-              if (dropIndex === index) classNames.push(styles.dropBefore);
-              if (dropIndex === index + 1 && index === segments.length - 1) {
-                classNames.push(styles.dropAfter);
-              }
-
-              return (
-                <div
-                  key={segment.id}
-                  className={classNames.join(' ')}
-                  style={{ width: `${(length / totalDuration) * 100}%` }}
-                  draggable
-                  onClick={(event) => handleSegmentClick(event, segment)}
-                  onDragStart={(event) => handleDragStart(event, index)}
-                  onDragOver={(event) => handleDragOver(event, index)}
-                  onDragEnd={handleDragEnd}
-                  title={`Source ${formatTime(segment.start)} – ${formatTime(segment.end)}`}
-                >
-                  <SegmentWaveform
-                    waveformData={waveformData}
-                    duration={duration}
-                    start={segment.start}
-                    end={segment.end}
-                  />
-                  <span className={styles.segmentLabel}>
-                    {index + 1} · {formatTime(length)}
-                  </span>
-                  {isSelected && segments.length > 1 && (
-                    <button
-                      type="button"
-                      className={styles.segmentDelete}
-                      aria-label="Delete segment"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onDeleteSegment(segment.id);
-                        onSelectSegment?.(null);
-                      }}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              );
-            })}
+            {playheadTime !== null && (
+              <div
+                className={styles.playhead}
+                style={{ left: `${(playheadTime / totalDuration) * 100}%` }}
+              />
+            )}
           </div>
-
-          {playheadTime !== null && (
-            <div
-              className={styles.playhead}
-              style={{ left: `${(playheadTime / totalDuration) * 100}%` }}
-            />
-          )}
         </div>
       </div>
 
       <p className={styles.hintRow}>
         Click a segment or clip to inspect it below · drag segments to
         rearrange · use the + buttons to add overlays at the playhead · drag
-        overlay clips to move, drag their edges to trim
+        overlay clips to move, drag their edges to trim · zoom in with + / −
+        and scroll the track sideways (shift + wheel)
         {hiddenOverlayCount > 0 && (
           <>
             {' '}· {hiddenOverlayCount} overlay

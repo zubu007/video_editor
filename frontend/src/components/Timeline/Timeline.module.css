@@ -40,6 +40,47 @@
   cursor: not-allowed;
 }
 
+.zoomGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.zoomButton {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.zoomButton:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.zoomButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.zoomLabel {
+  min-width: 34px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .summary {
   margin-left: auto;
   display: flex;
@@ -144,10 +185,19 @@
   cursor: not-allowed;
 }
 
-.lanes {
-  position: relative;
+/* Clips the zoomed lanes and provides the horizontal scroll. */
+.scroller {
   flex: 1;
   min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+/* Width is set inline from the zoom factor (100% = fits the scroller). */
+.lanes {
+  position: relative;
   display: flex;
   flex-direction: column;
 }
