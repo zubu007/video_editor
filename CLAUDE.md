@@ -145,6 +145,18 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   /api/video/remove-captions/{file_id}` starts a `BackgroundTasks` job and returns a `job_id`;
   `GET /api/caption-removal/status/{job_id}` is polled until `done`, then returns the cleaned
   video's `/api/renders/{filename}` URL. The frontend's `EditorTools/CaptionTool` drives this.
+- `gaming/death_detect.py` — Dota 2 death/alive interval detection (for the "Edit a gaming
+  video" mode). `detect_death_intervals(video)` → `[{start, end, duration}]` dead ranges, read
+  from the HUD, not the scene (Dota does **not** grayscale on death). It colour-matches the
+  bottom hero globe to the player's fixed top-bar slot (`identify_player_slot`), then flags the
+  golden respawn-box under that slot as the dead signal; `DotaHudLayout` holds the
+  1920×1080-calibrated coordinates. `gaming/jobs.py` runs it as a **background job**. Wired to the
+  frontend's **"Deaths" tab** (`EditorTools/DeathCutsPanel`, shown only for gaming-mode projects):
+  `POST /api/gaming/detect-deaths/{file_id}` → poll `GET /api/gaming/death-detect/status/{job_id}`;
+  `GET /api/gaming/slot-preview/{file_id}` returns the auto slot + 5 base64 portrait thumbnails for
+  a **manual slot selector** (override the auto-match when it's wrong). Detected ranges save as
+  `cut` EditOperations (`source="death_detection"`). Only Radiant slot centres are calibrated; see
+  [TODO.md](TODO.md) item 3 for findings and open work (Dire calibration).
 
 ### Persistence ([backend/storage/database.py](backend/storage/database.py))
 

@@ -6,20 +6,62 @@
 Planned for the "Edit a gaming video" start-screen option. Waiting on a sample
 recording to calibrate CV thresholds before implementation.
 
-3. **Cut death time (CV-based)**
-   - Detect when the player's hero is dead by the Dota 2 death-screen grayscale:
-     the screen desaturates (+ dark vignette + respawn timer) while dead and snaps
-     back to full color on respawn/buyback.
-   - Approach: sample frames (a few fps), measure color saturation in the central
-     screen region; a sustained low-saturation stretch = a death period. No ML/game
-     integration needed; numpy on sampled frames.
-   - New module `features/gaming/death_detect.py` returning `{start, end}` ranges
-     (pad + reuse `audio_pause`'s `merge_nearby_pauses`).
-   - Feed ranges into the existing cut pipeline: `video_cutter/cut.py` already
-     *removes* given ranges and keeps the rest, and they save as `cut`
-     EditOperations that render + show on the timeline for free.
-   - NEEDS: a 2-3 min sample clip that includes at least one death→respawn, plus
-     the capture resolution, to tune the saturation threshold.
+3. **Cut death time (CV-based)** — ✅ BUILT, VALIDATED & WIRED INTO THE APP
+   - Module: `backend/features/gaming/death_detect.py` →
+     `detect_death_intervals(video)` returns `[{start, end, duration}]` dead
+     ranges in source seconds. Validated on the full sample game (1920×1080/60,
+     34.8 min): auto-identified the player slot (0.95 conf) and found 3 solid
+     deaths — 354→361s (7s), 558→576s (18s), 2077→2083s (6s) — in ~90s.
+
+   **Findings from the sample footage (IMPORTANT — don't relearn):**
+   - ❌ **Grayscale approach ruled out.** Modern Dota does NOT desaturate the
+     screen on death (verified: central saturation never collapses; while dead
+     you free-look over the colourful map). The original plan does not work.
+   - ❌ **Bottom HUD is selection-dependent** — clicking another unit shows their
+     portrait/HP/respawn there, so never use it as the dead signal.
+   - ❌ **Top-bar portrait grey-out is too noisy** — mean saturation of the slot
+     did not cleanly separate dead/alive.
+   - ✅ **Player's slot = colour-signature match.** Bottom hero globe vs top-bar
+     icon are different art, so match a *masked HSV Hue-Sat histogram* (hero
+     palette is the cross-art invariant), voted over ~15 early frames. Correctly
+     locked slot 5 (Vengeful Spirit/Support), margin 0.33. Fixed all game →
+     immune to teamfight simultaneous deaths.
+   - ✅ **Dead signal = golden respawn-box** under the player's fixed slot: a
+     gold-bordered countdown box present only while dead. Detect the fraction of
+     gold-hue pixels (OpenCV H 12–32, S>110, V>140) in the box region; a
+     *continuous* run >5s = a death. Clean (median 0, ~0.077 during deaths).
+     Handles buyback/Aegis (box vanishes early). Do NOT merge runs across gaps —
+     a solid box never flickers, so gaps are noise, not one death.
+   - ✅ **K/D/A deaths OCR** (top-left, tesseract) is a clean death-*event*
+     signal over short spans but too noisy to anchor over a full match; kept as
+     optional `use_ocr` confirmation tag only (default off, no tesseract needed).
+   - Ultra-short early respawns (~<5s, e.g. the sample's first death ~177s) are
+     intentionally skipped — not worth cutting.
+   - Coordinates/thresholds live in `DotaHudLayout` (calibrated 1920×1080,
+     `.scaled()` for other resolutions). Dire (right-side) slot centres are NOT
+     yet calibrated — only Radiant. Tests: `backend/tests/test_death_detect.py`
+     (pure fns; full-video test gated behind `DEATH_DETECT_SLOW`).
+
+   **App wiring (done):**
+   - "Edit a gaming video" start card → normal upload flow with `isGaming` set →
+     a **"Deaths"** side-panel tab (`EditorTools/DeathCutsPanel`).
+   - Background job (`features/gaming/jobs.py`) + endpoints:
+     `POST /api/gaming/detect-deaths/{file_id}` (params `team`, `player_slot`,
+     `use_ocr`), `GET /api/gaming/death-detect/status/{job_id}`, and
+     `GET /api/gaming/slot-preview/{file_id}` (auto slot + 5 base64 portrait
+     thumbnails for the manual selector). Detected intervals are saved as `cut`
+     EditOperations (`source="death_detection"`) via the existing edit endpoint,
+     so render/timeline work for free.
+   - **Manual slot selector (backup):** the panel shows the 5 team portraits with
+     the auto-detected one highlighted; the user can click their hero to override
+     and re-detect with that `player_slot`. Handles the case where the colour
+     match is wrong or teamfight deaths confuse auto-ID.
+
+   **Still open:**
+   - Calibrate Dire (right-side) slot centres in `DotaHudLayout` — only Radiant
+     is done; picking Dire in the UI currently raises until calibrated.
+   - Optional: auto-detect team; padding control for the death cuts; a progress
+     signal during the ~90s scan (currently indeterminate "Scanning…").
 
 4. **Manual streaming captions (typewriter effect)** — ✅ DONE
    - User pauses at the playhead, types a note (e.g. a thought or item-choice

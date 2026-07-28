@@ -12,6 +12,7 @@ import EditingPlanPanel from './components/EditorTools/EditingPlanPanel';
 import EditsPanel from './components/EditorTools/EditsPanel';
 import StockFootagePanel from './components/EditorTools/StockFootagePanel';
 import DiagramPanel from './components/EditorTools/DiagramPanel';
+import DeathCutsPanel from './components/EditorTools/DeathCutsPanel';
 import ChatPanel from './components/Assistant/ChatPanel';
 import InspectorPanel from './components/Inspector/InspectorPanel';
 import SettingsModal from './components/Settings/SettingsModal';
@@ -39,11 +40,16 @@ import {
   getAbsoluteAPIURL,
   getCaptionStyles,
   sendProjectChat,
+  getSlotPreview,
+  startDeathDetection,
+  getDeathDetectionStatus,
 } from './services/api';
 import './App.css';
 
 // How often to poll a running render job for progress.
 const RENDER_POLL_INTERVAL_MS = 1000;
+// How often to poll a running death-detection job.
+const DEATH_POLL_INTERVAL_MS = 2000;
 
 function App() {
   const { settings, updateSetting } = useSettings();
@@ -51,7 +57,10 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activePanel, setActivePanel] = useState('tools');
   const [currentView, setCurrentView] = useState('editor');
-  const [sourceMode, setSourceMode] = useState('choose'); // 'choose' | 'upload' | 'record'
+  const [sourceMode, setSourceMode] = useState('choose'); // 'choose' | 'upload' | 'record' | 'youtube' | 'gaming'
+  // True when the project was started via "Edit a gaming video" — surfaces the
+  // Dota 2 "Deaths" tab.
+  const [isGaming, setIsGaming] = useState(false);
   const [renderOptions, setRenderOptions] = useState({
     format: 'mp4',
     quality: 'high',
@@ -123,7 +132,19 @@ function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [isChatSending, setIsChatSending] = useState(false);
   const [chatError, setChatError] = useState(null);
+  // Dota 2 death detection: team, job status, detected intervals, the resolved
+  // slot + confidence, and the manual slot-selector state (thumbnails + override).
+  const [deathTeam, setDeathTeam] = useState('radiant');
+  const [deathStatus, setDeathStatus] = useState('idle'); // idle|loading-slots|detecting|done|error
+  const [deathError, setDeathError] = useState(null);
+  const [deathIntervals, setDeathIntervals] = useState([]);
+  const [deathPlayerSlot, setDeathPlayerSlot] = useState(null);
+  const [deathConfidence, setDeathConfidence] = useState(null);
+  const [deathSlots, setDeathSlots] = useState([]);
+  const [deathSelectedSlot, setDeathSelectedSlot] = useState(null);
+  const [deathCutsSaved, setDeathCutsSaved] = useState(0);
   const videoPlayerRef = useRef(null);
+  const deathPollRef = useRef(null);
   // Holds the setInterval id for polling the active render job's status.
   const renderPollRef = useRef(null);
 
@@ -330,6 +351,14 @@ function App() {
     setRenderResult(null);
     setChatMessages([]);
     setChatError(null);
+    setDeathStatus('idle');
+    setDeathError(null);
+    setDeathIntervals([]);
+    setDeathPlayerSlot(null);
+    setDeathConfidence(null);
+    setDeathSlots([]);
+    setDeathSelectedSlot(null);
+    setDeathCutsSaved(0);
   };
 
   // Given a backend response carrying file_id/project_id/media_asset_id (from either a
@@ -1443,6 +1472,111 @@ function App() {
   // Stop any in-flight render polling if the app unmounts.
   useEffect(() => stopRenderPolling, []);
 
+  // --- Dota 2 death detection ---------------------------------------------
+  const stopDeathPolling = () => {
+    if (deathPollRef.current) {
+      clearInterval(deathPollRef.current);
+      deathPollRef.current = null;
+    }
+  };
+  useEffect(() => stopDeathPolling, []);
+
+  // Load the 5 team-portrait thumbnails so the user can correct the auto slot.
+  const handleLoadDeathSlots = async () => {
+    if (!fileId) return;
+    setDeathStatus('loading-slots');
+    setDeathError(null);
+    try {
+      const data = await getSlotPreview(fileId, deathTeam);
+      setDeathSlots(data.slots || []);
+      if (deathPlayerSlot === null && data.auto_slot >= 0) {
+        setDeathPlayerSlot(data.auto_slot);
+        setDeathConfidence(data.confidence);
+      }
+      setDeathStatus('idle');
+    } catch (error) {
+      console.error('Error loading slot preview:', error);
+      const detail = error.response?.data?.detail;
+      setDeathError(detail || 'Could not load hero portraits.');
+      setDeathStatus('error');
+    }
+  };
+
+  const handleSelectDeathSlot = (index) => {
+    setDeathSelectedSlot(index);
+  };
+
+  // Start detection (auto slot, or the manual override) and poll to completion.
+  const handleDetectDeaths = async () => {
+    if (!fileId) return;
+
+    stopDeathPolling();
+    setDeathStatus('detecting');
+    setDeathError(null);
+    setDeathIntervals([]);
+    try {
+      const { job_id: jobId } = await startDeathDetection(fileId, {
+        team: deathTeam,
+        playerSlot: deathSelectedSlot,
+      });
+      deathPollRef.current = setInterval(async () => {
+        try {
+          const status = await getDeathDetectionStatus(jobId);
+          if (status.status === 'done') {
+            stopDeathPolling();
+            setDeathIntervals(status.intervals || []);
+            if (status.player_slot != null) setDeathPlayerSlot(status.player_slot);
+            if (status.confidence != null) setDeathConfidence(status.confidence);
+            setDeathStatus('done');
+            logActivity(
+              `Death detection found ${(status.intervals || []).length} deaths.`
+            );
+          } else if (status.status === 'error') {
+            stopDeathPolling();
+            setDeathError(status.error || 'Death detection failed.');
+            setDeathStatus('error');
+          }
+        } catch (error) {
+          stopDeathPolling();
+          console.error('Error polling death detection:', error);
+          setDeathError('Lost contact with the detection job.');
+          setDeathStatus('error');
+        }
+      }, DEATH_POLL_INTERVAL_MS);
+    } catch (error) {
+      console.error('Error starting death detection:', error);
+      setDeathError('Could not start death detection.');
+      setDeathStatus('error');
+    }
+  };
+
+  // Persist the detected dead intervals as cut edits on the project.
+  const handleAddDeathCuts = async () => {
+    if (!projectId || deathIntervals.length === 0) return;
+
+    try {
+      await createProjectEdits(
+        projectId,
+        deathIntervals.map((iv) => ({
+          type: 'cut',
+          source: 'death_detection',
+          start: iv.start,
+          end: iv.end,
+          enabled: true,
+          media_asset_id: mediaAssetId,
+          metadata: { duration: iv.duration, kind: 'death' },
+        }))
+      );
+      const edits = await getProjectEdits(projectId);
+      applyLoadedEdits(edits.edits);
+      setDeathCutsSaved(deathIntervals.length);
+      logActivity(`Added ${deathIntervals.length} death cuts to the project.`);
+    } catch (error) {
+      console.error('Error saving death cuts:', error);
+      setDeathError('Could not add death cuts to the project.');
+    }
+  };
+
   const handleGoToRender = () => {
     setCurrentView('render');
   };
@@ -1494,6 +1628,16 @@ function App() {
     setRenderResult(null);
     setChatMessages([]);
     setChatError(null);
+    setDeathStatus('idle');
+    setDeathError(null);
+    setDeathIntervals([]);
+    setDeathPlayerSlot(null);
+    setDeathConfidence(null);
+    setDeathSlots([]);
+    setDeathSelectedSlot(null);
+    setDeathCutsSaved(0);
+    setIsGaming(false);
+    setActivePanel('tools');
     setCurrentView('editor');
     setSourceMode('choose');
   };
@@ -1510,7 +1654,10 @@ function App() {
                 <button
                   type="button"
                   className="source-card"
-                  onClick={() => setSourceMode('upload')}
+                  onClick={() => {
+                    setIsGaming(false);
+                    setSourceMode('upload');
+                  }}
                 >
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z" />
@@ -1521,7 +1668,10 @@ function App() {
                 <button
                   type="button"
                   className="source-card"
-                  onClick={() => setSourceMode('record')}
+                  onClick={() => {
+                    setIsGaming(false);
+                    setSourceMode('record');
+                  }}
                 >
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z" />
@@ -1532,7 +1682,10 @@ function App() {
                 <button
                   type="button"
                   className="source-card"
-                  onClick={() => setSourceMode('youtube')}
+                  onClick={() => {
+                    setIsGaming(false);
+                    setSourceMode('youtube');
+                  }}
                 >
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M21.6 7.2a2.6 2.6 0 0 0-1.83-1.84C18.15 4.92 12 4.92 12 4.92s-6.15 0-7.77.44A2.6 2.6 0 0 0 2.4 7.2C1.97 8.82 1.97 12 1.97 12s0 3.18.43 4.8a2.6 2.6 0 0 0 1.83 1.84c1.62.44 7.77.44 7.77.44s6.15 0 7.77-.44a2.6 2.6 0 0 0 1.83-1.84c.43-1.62.43-4.8.43-4.8s0-3.18-.43-4.8zM10 15.5v-7l6 3.5-6 3.5z" />
@@ -1543,13 +1696,16 @@ function App() {
                 <button
                   type="button"
                   className="source-card"
-                  onClick={() => setSourceMode('gaming')}
+                  onClick={() => {
+                    setIsGaming(true);
+                    setSourceMode('gaming');
+                  }}
                 >
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M17 4H7a6 6 0 0 0-6 6v4a3 3 0 0 0 5.4 1.8L8 14h8l1.6 1.8A3 3 0 0 0 23 14v-4a6 6 0 0 0-6-6zM8 12H6v2H5v-2H3v-1h2V9h1v2h2v1zm7-2a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm3 2a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />
                   </svg>
                   <strong>Edit a gaming video</strong>
-                  <span>Coming soon</span>
+                  <span>Upload a Dota 2 recording and auto-cut death time</span>
                 </button>
               </div>
             </div>
@@ -1573,10 +1729,10 @@ function App() {
                   onYouTubeImport={handleYouTubeImport}
                 />
               ) : sourceMode === 'gaming' ? (
-                <div className="source-placeholder">
-                  <h3>Gaming video editing</h3>
-                  <p>This mode isn&apos;t available yet — check back soon.</p>
-                </div>
+                <VideoUpload
+                  onVideoSelect={handleVideoSelect}
+                  onYouTubeImport={handleYouTubeImport}
+                />
               ) : (
                 <RecordVideo onVideoSelect={handleVideoSelect} />
               )}
@@ -1667,6 +1823,15 @@ function App() {
               >
                 Tools
               </button>
+              {isGaming && (
+                <button
+                  type="button"
+                  className={activePanel === 'deaths' ? 'active' : ''}
+                  onClick={() => setActivePanel('deaths')}
+                >
+                  Deaths
+                </button>
+              )}
               <button
                 type="button"
                 className={activePanel === 'plan' ? 'active' : ''}
@@ -1738,6 +1903,26 @@ function App() {
               )}
               {activePanel === 'tools' && (
                 <CaptionTool key={fileId} fileId={fileId} useGpu={settings.useGpu} />
+              )}
+              {activePanel === 'deaths' && (
+                <DeathCutsPanel
+                  hasProject={Boolean(projectId)}
+                  team={deathTeam}
+                  onChangeTeam={setDeathTeam}
+                  status={deathStatus}
+                  error={deathError}
+                  intervals={deathIntervals}
+                  playerSlot={deathPlayerSlot}
+                  confidence={deathConfidence}
+                  slots={deathSlots}
+                  selectedSlot={deathSelectedSlot}
+                  onLoadSlots={handleLoadDeathSlots}
+                  onSelectSlot={handleSelectDeathSlot}
+                  onDetect={handleDetectDeaths}
+                  onSeek={handleSeek}
+                  onAddCuts={handleAddDeathCuts}
+                  savedCount={deathCutsSaved}
+                />
               )}
               {activePanel === 'plan' && (
                 <EditingPlanPanel

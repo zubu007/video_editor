@@ -470,4 +470,52 @@ export async function detectGpu() {
   return response.data;
 }
 
+/**
+ * Fetch the auto-identified player slot and portrait thumbnails for a Dota game.
+ * Powers the manual slot selector.
+ * @param {string} fileId - Uploaded video file_id
+ * @param {string} team - 'radiant' or 'dire'
+ * @returns {Promise<{team: string, auto_slot: number, confidence: number, slots: string[]}>}
+ */
+export async function getSlotPreview(fileId, team = 'radiant') {
+  const response = await apiClient.get(`/api/gaming/slot-preview/${fileId}`, {
+    params: { team },
+  });
+  return response.data;
+}
+
+/**
+ * Start a background Dota 2 death-detection job.
+ * @param {string} fileId - Uploaded video file_id
+ * @param {{team?: string, playerSlot?: number|null, useOcr?: boolean}} [options]
+ * @returns {Promise<{job_id: string, status: string}>}
+ */
+export async function startDeathDetection(
+  fileId,
+  { team = 'radiant', playerSlot = null, useOcr = false } = {}
+) {
+  const params = { team, use_ocr: useOcr };
+  if (playerSlot !== null && playerSlot !== undefined) {
+    params.player_slot = playerSlot;
+  }
+  const response = await apiClient.post(
+    `/api/gaming/detect-deaths/${fileId}`,
+    null,
+    { params }
+  );
+  return response.data;
+}
+
+/**
+ * Poll a death-detection job.
+ * @param {string} jobId - Job ID from startDeathDetection
+ * @returns {Promise<{job_id: string, status: string,
+ *   intervals: Array<{start: number, end: number, duration: number}>,
+ *   player_slot: number|null, confidence: number|null, error: string|null}>}
+ */
+export async function getDeathDetectionStatus(jobId) {
+  const response = await apiClient.get(`/api/gaming/death-detect/status/${jobId}`);
+  return response.data;
+}
+
 export default apiClient;

@@ -44,6 +44,12 @@ from backend.features.caption_removal.jobs import (
     run_caption_removal_job,
 )
 from backend.features.caption_removal.remove import DEFAULT_MODE, use_gpu_from_env
+from backend.features.gaming import extract_slot_previews
+from backend.features.gaming.jobs import (
+    create_job as create_death_detect_job,
+    get_job as get_death_detect_job,
+    run_death_detect_job,
+)
 from backend.features.captions import (
     DEFAULT_STYLE as DEFAULT_CAPTION_STYLE,
     STYLE_PRESETS as CAPTION_STYLE_PRESETS,
@@ -635,6 +641,51 @@ class CaptionJobStatusResponse(BaseModel):
     )
     error: Optional[str] = Field(
         None, description="Failure detail when status is 'error'"
+    )
+
+
+class DeathDetectStartResponse(BaseModel):
+    """Response model for starting a death-detection job."""
+
+    job_id: str = Field(..., description="Identifier for polling job status")
+    status: str = Field(..., description="Job status (pending|running|done|error)")
+
+
+class DeathIntervalResponse(BaseModel):
+    """One detected dead interval, in source-video seconds."""
+
+    start: float
+    end: float
+    duration: float
+
+
+class DeathDetectStatusResponse(BaseModel):
+    """Response model for death-detection job status."""
+
+    job_id: str
+    status: str = Field(..., description="Job status (pending|running|done|error)")
+    intervals: list[DeathIntervalResponse] = Field(default_factory=list)
+    player_slot: Optional[int] = Field(
+        None, description="0-based top-bar slot used for detection"
+    )
+    confidence: Optional[float] = Field(
+        None,
+        description="Auto-identification confidence in [0, 1] (null if overridden)",
+    )
+    error: Optional[str] = Field(
+        None, description="Failure detail when status is 'error'"
+    )
+
+
+class SlotPreviewResponse(BaseModel):
+    """Auto-identified slot plus base64 portrait thumbnails for the slot picker."""
+
+    team: str
+    auto_slot: int = Field(..., description="Auto-identified slot, or -1 if unsure")
+    confidence: float
+    slots: list[str] = Field(
+        default_factory=list,
+        description="Per-slot PNG thumbnails as data URLs, in slot order",
     )
 
 
@@ -2361,6 +2412,113 @@ async def get_caption_removal_status(job_id: str):
         job_id=job.job_id,
         status=job.status,
         output_url=output_url,
+        error=job.error,
+    )
+
+
+# ============================================================================
+# Gaming (Dota 2) Death-Detection Endpoints
+# ============================================================================
+
+
+def _encode_thumbnail(bgr) -> str:
+    """Encode a BGR image array as a base64 PNG data URL."""
+    import base64
+
+    import cv2
+
+    ok, buffer = cv2.imencode(".png", bgr)
+    if not ok:
+        return ""
+    return "data:image/png;base64," + base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+@app.get("/api/gaming/slot-preview/{file_id}", response_model=SlotPreviewResponse)
+async def gaming_slot_preview(file_id: str, team: str = "radiant"):
+    """Return the auto-identified player slot plus portrait thumbnails.
+
+    Drives the manual slot selector: the client shows the five team portraits
+    (auto pick highlighted) so the user can correct it before detecting deaths.
+    """
+    try:
+        video_path = find_uploaded_video(file_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        auto_slot, confidence, thumbs = extract_slot_previews(
+            str(video_path), team=team
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 - surface decode/HUD failures as 500
+        logger.error("Slot preview failed for %s: %s", file_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return SlotPreviewResponse(
+        team=team,
+        auto_slot=auto_slot,
+        confidence=confidence,
+        slots=[_encode_thumbnail(thumb) for thumb in thumbs],
+    )
+
+
+@app.post(
+    "/api/gaming/detect-deaths/{file_id}", response_model=DeathDetectStartResponse
+)
+async def start_death_detection(
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    team: str = "radiant",
+    player_slot: Optional[int] = None,
+    use_ocr: bool = False,
+):
+    """Start a background Dota 2 death-detection job over a recording.
+
+    Auto-identifies the player's top-bar slot unless ``player_slot`` overrides it
+    (the app's manual selector). Poll ``/api/gaming/death-detect/status/{job_id}``
+    for the detected dead intervals.
+    """
+    try:
+        video_path = find_uploaded_video(file_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    job = create_death_detect_job(file_id)
+    background_tasks.add_task(
+        run_death_detect_job,
+        job.job_id,
+        str(video_path),
+        team=team,
+        player_slot=player_slot,
+        use_ocr=use_ocr,
+    )
+    logger.info(
+        "Started death-detection job %s for file %s (team=%s, slot=%s)",
+        job.job_id,
+        file_id,
+        team,
+        player_slot,
+    )
+    return DeathDetectStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get(
+    "/api/gaming/death-detect/status/{job_id}",
+    response_model=DeathDetectStatusResponse,
+)
+async def get_death_detection_status(job_id: str):
+    """Return the status and (when done) the detected dead intervals of a job."""
+    job = get_death_detect_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Death detection job not found")
+
+    return DeathDetectStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        intervals=[DeathIntervalResponse(**iv) for iv in job.intervals],
+        player_slot=job.player_slot,
+        confidence=job.confidence,
         error=job.error,
     )
 
