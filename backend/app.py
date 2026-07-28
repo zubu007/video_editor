@@ -659,12 +659,23 @@ class DeathIntervalResponse(BaseModel):
     duration: float
 
 
+class GamingEventResponse(BaseModel):
+    """A K/D/A event marker at a source-video timestamp."""
+
+    time: float
+    kind: str = Field(..., description="Event kind: 'K', 'D', or 'A'")
+
+
 class DeathDetectStatusResponse(BaseModel):
     """Response model for death-detection job status."""
 
     job_id: str
     status: str = Field(..., description="Job status (pending|running|done|error)")
     intervals: list[DeathIntervalResponse] = Field(default_factory=list)
+    events: list[GamingEventResponse] = Field(
+        default_factory=list,
+        description="K/D/A markers for the play bar, in source seconds",
+    )
     player_slot: Optional[int] = Field(
         None, description="0-based top-bar slot used for detection"
     )
@@ -675,6 +686,21 @@ class DeathDetectStatusResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Failure detail when status is 'error'"
     )
+
+
+class HighlightClipRequest(BaseModel):
+    """Request to trim a quick highlight clip from a source recording."""
+
+    start: float = Field(..., ge=0, description="Clip start in source seconds")
+    end: float = Field(..., gt=0, description="Clip end in source seconds")
+
+
+class HighlightClipResponse(BaseModel):
+    """A trimmed highlight clip ready for download/preview."""
+
+    filename: str
+    output_url: str = Field(..., description="URL to fetch the clip from")
+    duration: float = Field(..., description="Clip length in seconds")
 
 
 class SlotPreviewResponse(BaseModel):
@@ -2471,13 +2497,18 @@ async def start_death_detection(
     background_tasks: BackgroundTasks,
     team: str = "radiant",
     player_slot: Optional[int] = None,
-    use_ocr: bool = False,
+    detect_kda: bool = False,
 ):
     """Start a background Dota 2 death-detection job over a recording.
 
-    Auto-identifies the player's top-bar slot unless ``player_slot`` overrides it
-    (the app's manual selector). Poll ``/api/gaming/death-detect/status/{job_id}``
-    for the detected dead intervals.
+    A single HUD scan detects the player's dead intervals and, when
+    ``detect_kda`` is set (and tesseract is available), the kills/deaths/assists
+    event markers for the play bar. ``detect_kda`` is off by default so plain
+    death-cut detection stays fast; the "Detect K/D/A markers" action turns it on
+    (the OCR pass roughly doubles the scan time). Auto-identifies the player's
+    top-bar slot unless ``player_slot`` overrides it (the app's manual selector).
+    Poll ``/api/gaming/death-detect/status/{job_id}`` for the intervals and
+    markers.
     """
     try:
         video_path = find_uploaded_video(file_id)
@@ -2491,7 +2522,7 @@ async def start_death_detection(
         str(video_path),
         team=team,
         player_slot=player_slot,
-        use_ocr=use_ocr,
+        detect_kda=detect_kda,
     )
     logger.info(
         "Started death-detection job %s for file %s (team=%s, slot=%s)",
@@ -2517,9 +2548,76 @@ async def get_death_detection_status(job_id: str):
         job_id=job.job_id,
         status=job.status,
         intervals=[DeathIntervalResponse(**iv) for iv in job.intervals],
+        events=[GamingEventResponse(**ev) for ev in job.events],
         player_slot=job.player_slot,
         confidence=job.confidence,
         error=job.error,
+    )
+
+
+@app.post(
+    "/api/gaming/highlight-clip/{file_id}", response_model=HighlightClipResponse
+)
+async def create_highlight_clip(file_id: str, request: HighlightClipRequest):
+    """Trim a quick highlight clip from the source between two timestamps.
+
+    Re-encodes ``source[start:end]`` with ffmpeg (fast seek + veryfast preset,
+    frame-accurate at the cut) and returns a downloadable ``/api/renders`` URL —
+    handy for pulling a short clip out of a long gameplay recording.
+    """
+    if request.end <= request.start:
+        raise HTTPException(status_code=400, detail="end must be greater than start")
+
+    try:
+        video_path = find_uploaded_video(file_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    duration = round(request.end - request.start, 3)
+    output_filename = (
+        f"highlight_{file_id}_{int(request.start)}-{int(request.end)}_"
+        f"{uuid.uuid4().hex[:8]}.mp4"
+    )
+    output_path = OUTPUT_DIR / output_filename
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{request.start:.3f}",
+        "-i",
+        str(video_path),
+        "-t",
+        f"{duration:.3f}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        logger.error("Highlight clip ffmpeg failed: %s", e.stderr)
+        raise HTTPException(
+            status_code=500, detail="Failed to create highlight clip"
+        )
+
+    logger.info(
+        "Created highlight clip %s (%.2fs) for file %s",
+        output_filename,
+        duration,
+        file_id,
+    )
+    return HighlightClipResponse(
+        filename=output_filename,
+        output_url=f"/api/renders/{output_filename}",
+        duration=duration,
     )
 
 

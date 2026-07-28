@@ -406,6 +406,41 @@ def _ocr_deaths(kda_bgr: np.ndarray, previous: int) -> int:
     return value if previous <= value <= previous + 3 else previous
 
 
+def _ocr_kda(
+    kda_bgr: np.ndarray, previous: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    """Read the full kills/deaths/assists triple, kept monotonic non-decreasing.
+
+    Mirrors :func:`_ocr_deaths`'s preprocessing but returns all three counters.
+    Each value only ever rises during a match, so a read below the previous value
+    (or an implausible jump of more than a couple) is rejected as OCR noise and
+    the previous value carried forward.
+
+    Args:
+        kda_bgr: The K/D/A box crop (BGR).
+        previous: The last accepted ``(kills, deaths, assists)`` triple.
+
+    Returns:
+        The updated ``(kills, deaths, assists)`` triple.
+    """
+    import pytesseract
+
+    gray = cv2.cvtColor(kda_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
+    _, bw = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    text = pytesseract.image_to_string(
+        bw, config="--psm 7 -c tessedit_char_whitelist=0123456789/"
+    )
+    nums = re.findall(r"\d+", text)
+    if len(nums) < 3:
+        return previous
+    updated = []
+    for value_str, prev in zip(nums[:3], previous):
+        value = int(value_str)
+        updated.append(value if prev <= value <= prev + 3 else prev)
+    return updated[0], updated[1], updated[2]
+
+
 def _respawn_signal(strip: np.ndarray, center: int, layout: DotaHudLayout) -> float:
     """Fraction of golden pixels in the respawn-box region under the slot.
 
@@ -547,3 +582,103 @@ def detect_death_intervals(
         run["start"] = round(run["start"], 2)
         run["end"] = round(run["end"], 2)
     return intervals
+
+
+def detect_gaming_markers(
+    video_path: str | Path,
+    fps: float = 1.0,
+    team: str = "radiant",
+    player_slot: int | None = None,
+    detect_kda: bool = True,
+    layout: DotaHudLayout | None = None,
+) -> dict:
+    """Single-pass detection of dead intervals plus K/D/A timeline markers.
+
+    Runs one HUD scan and derives two things from it: the player's dead intervals
+    (the golden respawn-box runs — identical logic to
+    :func:`detect_death_intervals`) and, when ``detect_kda`` is set and tesseract
+    is available, point markers for each kills/assists counter increment. Death
+    (``"D"``) markers are taken from the interval starts (the reliable respawn
+    signal), not the noisier deaths OCR.
+
+    Args:
+        video_path: The gameplay recording (HUD visible).
+        fps: Sampling rate in frames per second.
+        team: The player's team (``"radiant"`` or ``"dire"``).
+        player_slot: 0-based top-bar slot; auto-identified when ``None``.
+        detect_kda: When ``True`` and tesseract is available, emit K/A markers.
+        layout: HUD geometry; defaults to the calibrated layout for the video.
+
+    Returns:
+        dict: ``{"player_slot", "confidence", "intervals", "events"}`` where
+        ``confidence`` is ``None`` if the caller supplied ``player_slot``,
+        ``intervals`` are ``{"start", "end", "duration"}`` dead windows, and
+        ``events`` are time-sorted ``{"time", "kind"}`` markers with ``kind`` in
+        ``{"K", "D", "A"}``.
+
+    Raises:
+        FileNotFoundError: If ``video_path`` does not exist.
+        RuntimeError: If the player's slot cannot be identified.
+    """
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    width, height = _video_dimensions(video_path)
+    layout = (layout or DotaHudLayout()).scaled(width, height)
+    centers = layout.team_centers(team)
+
+    confidence: float | None = None
+    if player_slot is None:
+        player_slot, confidence = identify_player_slot(video_path, layout, team)
+        logger.info(
+            "Identified player slot %d (confidence %.2f)", player_slot, confidence
+        )
+    slot_center = centers[player_slot]
+
+    kda_on = detect_kda and _ocr_available()
+    if detect_kda and not kda_on:
+        logger.warning("tesseract unavailable; skipping K/A markers")
+
+    times: list[float] = []
+    respawn: list[float] = []
+    kills_series: list[int] = []
+    assists_series: list[int] = []
+    kda = (0, 0, 0)
+    for t, strip in _stream_top_strip(video_path, fps, width, layout.strip_height):
+        times.append(t)
+        respawn.append(_respawn_signal(strip, slot_center, layout))
+        if kda_on:
+            kda = _ocr_kda(_crop(strip, layout.kda_box), kda)
+            kills_series.append(kda[0])
+            assists_series.append(kda[2])
+
+    if not times:
+        return {
+            "player_slot": player_slot,
+            "confidence": confidence,
+            "intervals": [],
+            "events": [],
+        }
+
+    runs = _signal_runs(times, respawn, _GOLD_FRACTION, _MIN_RESPAWN_SAMPLES)
+    intervals = [r for r in runs if r["end"] - r["start"] >= _MIN_DEATH_SECONDS]
+    for run in intervals:
+        run["duration"] = round(run["end"] - run["start"], 2)
+        run["start"] = round(run["start"], 2)
+        run["end"] = round(run["end"], 2)
+
+    events: list[dict] = [{"time": run["start"], "kind": "D"} for run in intervals]
+    if kda_on:
+        for t in _death_event_times(kills_series, times):
+            events.append({"time": round(t, 2), "kind": "K"})
+        for t in _death_event_times(assists_series, times):
+            events.append({"time": round(t, 2), "kind": "A"})
+    events.sort(key=lambda e: e["time"])
+
+    return {
+        "player_slot": player_slot,
+        "confidence": confidence,
+        "intervals": intervals,
+        "events": events,
+    }

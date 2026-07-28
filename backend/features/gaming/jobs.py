@@ -17,10 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from backend.features.gaming.death_detect import (
-    detect_death_intervals,
-    identify_player_slot,
-)
+from backend.features.gaming.death_detect import detect_gaming_markers
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +36,7 @@ class DeathDetectJob:
     file_id: str
     status: JobStatus = "pending"
     intervals: list[dict] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
     player_slot: Optional[int] = None
     confidence: Optional[float] = None
     error: Optional[str] = None
@@ -80,34 +78,38 @@ def run_death_detect_job(
     video_path: str,
     team: str = "radiant",
     player_slot: Optional[int] = None,
-    use_ocr: bool = False,
+    detect_kda: bool = True,
 ) -> None:
-    """Detect death intervals for a recording, recording the result on the job.
+    """Detect death intervals and K/D/A markers, recording them on the job.
 
-    When ``player_slot`` is ``None`` the slot is auto-identified first (so the
-    resolved slot and its confidence can be reported for the UI's slot selector);
-    otherwise the caller's manual override is used verbatim.
+    A single HUD scan yields both the player's dead intervals (saved as cuts) and
+    the kills/deaths/assists event markers for the play bar. When ``player_slot``
+    is ``None`` the slot is auto-identified first (so the resolved slot and its
+    confidence can drive the UI's slot selector); otherwise the caller's manual
+    override is used verbatim. ``detect_kda`` toggles the K/A OCR pass.
     """
     update_job(job_id, status="running")
     try:
-        confidence: Optional[float] = None
-        if player_slot is None:
-            player_slot, confidence = identify_player_slot(video_path, team=team)
-        intervals = detect_death_intervals(
-            video_path, team=team, player_slot=player_slot, use_ocr=use_ocr
+        result = detect_gaming_markers(
+            video_path,
+            team=team,
+            player_slot=player_slot,
+            detect_kda=detect_kda,
         )
         update_job(
             job_id,
             status="done",
-            intervals=intervals,
-            player_slot=player_slot,
-            confidence=confidence,
+            intervals=result["intervals"],
+            events=result["events"],
+            player_slot=result["player_slot"],
+            confidence=result["confidence"],
         )
         logger.info(
-            "Death detection job %s done: slot %s, %d deaths",
+            "Death detection job %s done: slot %s, %d deaths, %d events",
             job_id,
-            player_slot,
-            len(intervals),
+            result["player_slot"],
+            len(result["intervals"]),
+            len(result["events"]),
         )
     except Exception as e:  # noqa: BLE001 - record any failure for the poller
         logger.error("Death detection job %s failed: %s", job_id, e)

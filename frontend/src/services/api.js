@@ -486,15 +486,18 @@ export async function getSlotPreview(fileId, team = 'radiant') {
 
 /**
  * Start a background Dota 2 death-detection job.
+ *
+ * A single HUD scan detects dead intervals and (when `detectKda` is set and
+ * tesseract is available) the K/D/A event markers for the play bar.
  * @param {string} fileId - Uploaded video file_id
- * @param {{team?: string, playerSlot?: number|null, useOcr?: boolean}} [options]
+ * @param {{team?: string, playerSlot?: number|null, detectKda?: boolean}} [options]
  * @returns {Promise<{job_id: string, status: string}>}
  */
 export async function startDeathDetection(
   fileId,
-  { team = 'radiant', playerSlot = null, useOcr = false } = {}
+  { team = 'radiant', playerSlot = null, detectKda = false } = {}
 ) {
-  const params = { team, use_ocr: useOcr };
+  const params = { team, detect_kda: detectKda };
   if (playerSlot !== null && playerSlot !== undefined) {
     params.player_slot = playerSlot;
   }
@@ -511,10 +514,26 @@ export async function startDeathDetection(
  * @param {string} jobId - Job ID from startDeathDetection
  * @returns {Promise<{job_id: string, status: string,
  *   intervals: Array<{start: number, end: number, duration: number}>,
+ *   events: Array<{time: number, kind: string}>,
  *   player_slot: number|null, confidence: number|null, error: string|null}>}
  */
 export async function getDeathDetectionStatus(jobId) {
   const response = await apiClient.get(`/api/gaming/death-detect/status/${jobId}`);
+  return response.data;
+}
+
+/**
+ * Trim a quick highlight clip from the source between two timestamps.
+ * @param {string} fileId - Uploaded video file_id
+ * @param {number} start - Clip start in source seconds
+ * @param {number} end - Clip end in source seconds
+ * @returns {Promise<{filename: string, output_url: string, duration: number}>}
+ */
+export async function createHighlightClip(fileId, start, end) {
+  const response = await apiClient.post(
+    `/api/gaming/highlight-clip/${fileId}`,
+    { start, end }
+  );
   return response.data;
 }
 

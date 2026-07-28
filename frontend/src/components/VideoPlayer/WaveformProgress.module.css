@@ -50,6 +50,51 @@
   background: rgba(148, 163, 184, 0.25);
 }
 
+/* K/D/A event markers: a thin vertical tick with a small label chip on top. */
+.eventMarker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  z-index: 4;
+  background: var(--event-color);
+}
+
+.eventLabel {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  color: #0b0f1a;
+  background: var(--event-color);
+  pointer-events: none;
+}
+
+.eventMarker:hover {
+  filter: brightness(1.25);
+}
+
+.eventK {
+  --event-color: #34d399; /* kills — green */
+}
+
+.eventD {
+  --event-color: #f87171; /* deaths — red */
+}
+
+.eventA {
+  --event-color: #60a5fa; /* assists — blue */
+}
+
 .loadingState {
   width: 100%;
   height: 60px;
