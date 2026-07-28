@@ -292,6 +292,12 @@ function App() {
 
   // Reset all per-project derived state before loading a new source video.
   const resetProjectStateForLoad = () => {
+    // Drop any in-flight render poll first: it belongs to the outgoing project
+    // and would otherwise keep polling a stale job, then inject that project's
+    // result into this one when it finishes.
+    stopRenderPolling();
+    setIsRendering(false);
+    setRenderProgress(0);
     setProjectId(null);
     setMediaAssetId(null);
     setWaveformData(null);
@@ -1446,6 +1452,10 @@ function App() {
   };
 
   const resetProjectState = () => {
+    // Stop tracking the outgoing project's render before tearing its state down.
+    stopRenderPolling();
+    setIsRendering(false);
+    setRenderProgress(0);
     if (videoSrc?.startsWith('blob:')) {
       URL.revokeObjectURL(videoSrc);
     }

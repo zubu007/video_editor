@@ -812,6 +812,45 @@ async def save_upload_file(upload_file: UploadFile, destination: Path) -> None:
         await f.write(content)
 
 
+def temp_upload_path(filename: str) -> Path:
+    """Build a safe, collision-free path under ``UPLOAD_DIR`` for an upload.
+
+    ``filename`` is supplied by the client and is never trusted: the stored
+    name is a fresh UUID and only a conservative extension is carried over.
+    Joining the raw name would let ``../../../tmp/evil`` write outside
+    ``UPLOAD_DIR`` — and, via the callers' ``finally`` cleanup, unlink an
+    arbitrary existing file.
+
+    Args:
+        filename: The client-supplied upload filename.
+
+    Returns:
+        A path inside ``UPLOAD_DIR`` that no other request can collide with.
+    """
+    suffix = Path(filename).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
+        suffix = ""
+    return UPLOAD_DIR / f"upload_{uuid.uuid4().hex}{suffix}"
+
+
+def safe_download_name(filename: str, fallback: str = "video.mp4") -> str:
+    """Reduce a client-supplied filename to one safe to join and serve.
+
+    Strips any directory components and replaces everything outside a plain
+    ``[A-Za-z0-9._-]`` set, so the result is a single path segment usable both
+    as an ``OUTPUT_DIR`` name and as a ``Content-Disposition`` filename.
+
+    Args:
+        filename: The client-supplied filename.
+        fallback: Name to use when nothing usable survives sanitizing.
+
+    Returns:
+        A single safe path segment.
+    """
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).name).lstrip(".")
+    return name or fallback
+
+
 def find_uploaded_video(file_id: str) -> Path:
     """Find an uploaded video by file ID."""
     for ext in VIDEO_EXTENSIONS:
@@ -2431,7 +2470,7 @@ async def extract_transcript_segments(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
+    video_path = temp_upload_path(video.filename)
     try:
         await save_upload_file(video, video_path)
 
@@ -2486,7 +2525,7 @@ async def extract_transcript_sentences_endpoint(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
+    video_path = temp_upload_path(video.filename)
     try:
         await save_upload_file(video, video_path)
 
@@ -2541,7 +2580,7 @@ async def extract_transcript_words_endpoint(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
+    video_path = temp_upload_path(video.filename)
     try:
         await save_upload_file(video, video_path)
 
@@ -2606,7 +2645,7 @@ async def detect_filler_words_endpoint(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
+    video_path = temp_upload_path(video.filename)
     try:
         await save_upload_file(video, video_path)
 
@@ -2680,8 +2719,8 @@ async def cut_filler_words_endpoint(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
-    output_filename = f"edited_{video.filename}"
+    video_path = temp_upload_path(video.filename)
+    output_filename = f"edited_{safe_download_name(video.filename)}"
     output_path = OUTPUT_DIR / output_filename
 
     try:
@@ -2773,7 +2812,7 @@ async def generate_editing_plan_endpoint(
         raise HTTPException(status_code=400, detail="No filename provided")
 
     # Save uploaded file
-    video_path = UPLOAD_DIR / video.filename
+    video_path = temp_upload_path(video.filename)
     try:
         await save_upload_file(video, video_path)
 
