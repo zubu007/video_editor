@@ -160,9 +160,9 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
 - `gaming/reel_crop.py` — reframes a highlight clip as a **square reel** for the "Highlights" tab.
   A centred crop takes the frame to 1:1 (equal bands off each side), which keeps the top hero bar
   and the bottom hero/ability/item panel but discards the minimap and K/D/A readout; both are
-  cropped out of the discarded bands, scaled up (1.3x / 2x) and composited back onto the square —
-  minimap bottom-left (bottom edge pinned above the ability bar), K/D/A top-left under the hero
-  bar. `plan_reel(width, height)` resolves the geometry (`ReelLayout` is calibrated at 1920x1080
+  cropped out of the discarded bands, scaled up (1.17x / 2x) and composited back onto the square —
+  minimap flush in the bottom-left corner (over the hero portrait, deliberately), K/D/A top-left
+  under the hero bar. `plan_reel(width, height)` resolves the geometry (`ReelLayout` is calibrated at 1920x1080
   and scales, like `DotaHudLayout`) and `build_reel_filter()` emits it as one ffmpeg
   `-filter_complex` graph, so `highlight_jobs.run_highlight_job(..., square=True)` stays a single
   re-encode pass. Landscape sources only — `plan_reel` raises `ValueError` otherwise and the job

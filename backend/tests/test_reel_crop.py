@@ -23,11 +23,17 @@ class TestPlanReel(unittest.TestCase):
 
     def test_overlay_sizes_and_positions_at_calibrated_resolution(self):
         placement = plan_reel(1920, 1080)
-        # Minimap: 288x297 at 1.3x, bottom edge pinned to y=898.
-        self.assertEqual(placement.minimap_dst, (10, 512, 374, 386))
-        self.assertEqual(placement.minimap_dst[1] + placement.minimap_dst[3], 898)
+        # Minimap: 288x297 at 1.17x, flush into the bottom-left corner.
+        self.assertEqual(placement.minimap_dst, (0, 733, 337, 347))
         # K/D/A: 170x46 at 2x, clear of the top hero bar.
         self.assertEqual(placement.kda_dst, (18, 52, 340, 92))
+
+    def test_minimap_sits_flush_in_the_bottom_left_corner(self):
+        for width, height in ((1920, 1080), (2560, 1440), (1280, 720)):
+            placement = plan_reel(width, height)
+            x, y, w, h = placement.minimap_dst
+            self.assertEqual(x, 0, "no left padding")
+            self.assertEqual(y + h, placement.side, "no bottom padding")
 
     def test_overlays_stay_inside_the_square(self):
         for width, height in ((1920, 1080), (2560, 1440), (1280, 720)):
@@ -44,9 +50,7 @@ class TestPlanReel(unittest.TestCase):
         self.assertEqual(placement.crop_x, 560)
         # Everything is 4/3 of the calibrated numbers.
         self.assertEqual(placement.minimap_src, (0, 1044, 384, 396))
-        self.assertEqual(placement.minimap_dst, (13, 682, 499, 515))
-        # The pinned bottom edge scales too: 898 * 4/3.
-        self.assertEqual(placement.minimap_dst[1] + placement.minimap_dst[3], 1197)
+        self.assertEqual(placement.minimap_dst, (0, 977, 449, 463))
 
     def test_output_dimensions_are_even(self):
         # libx264 rejects odd dimensions; an odd-height source must round down.
@@ -74,8 +78,8 @@ class TestBuildReelFilter(unittest.TestCase):
         self.assertIn("[0:v]split=3", graph)
         self.assertIn("crop=1080:1080:420:0", graph)
         self.assertIn("crop=288:297:0:783", graph)
-        self.assertIn("scale=374:386", graph)
-        self.assertIn("overlay=10:512", graph)
+        self.assertIn("scale=337:347", graph)
+        self.assertIn("overlay=0:733", graph)
         self.assertIn("crop=170:46:0:56", graph)
         self.assertIn("scale=340:92", graph)
         self.assertIn("overlay=18:52", graph)

@@ -7,7 +7,8 @@ panel almost exactly. What it throws away are the two readouts a viewer needs to
 follow a highlight: the minimap in the bottom-left corner and the K/D/A counter
 in the top-left. This module lifts those two regions out of the discarded bands
 and composites them back onto the square frame, enlarged so they stay legible on
-a phone.
+a phone: the minimap flush into the bottom-left corner (over the hero portrait,
+which matters less than the map) and the K/D/A under the top hero bar.
 
 The whole reframe is expressed as a single ffmpeg ``-filter_complex`` graph
 (:func:`build_reel_filter`), so the highlight job stays one re-encode pass rather
@@ -59,12 +60,13 @@ class ReelLayout:
     # Both readout rows: `K/D/A a/b/c` and `LH/DN d/e`. Wide enough for three
     # double-digit numbers.
     kda_box: tuple[int, int, int, int] = (0, 56, 170, 102)
-    minimap_scale: float = 1.3
+    minimap_scale: float = 1.17
     kda_scale: float = 2.0
-    minimap_x: int = 10
-    # The minimap's *bottom* edge is pinned rather than its top: it stops just
-    # above the ability bar, so growing it never covers the hero portrait.
-    minimap_bottom: int = 898
+    minimap_x: int = 0
+    # The minimap's *bottom* edge is pinned rather than its top, so resizing it
+    # grows upward and stays in the corner. It sits flush in the bottom-left with
+    # no padding, over the hero portrait — the map matters more than the portrait.
+    minimap_bottom: int = 1080
     kda_x: int = 18
     # Clears the top hero bar, which ends at y=40 on the calibrated HUD.
     kda_y: int = 52
