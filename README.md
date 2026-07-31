@@ -140,6 +140,49 @@ Restart the backend. The "Remove Captions" button now runs on the GPU. You can a
 per request via `POST /api/video/remove-captions/{file_id}?use_gpu=true` (or `false`), and pick
 a higher-quality but slower inpainting model with `?mode=lama` / `?mode=propainter`.
 
+## Gaming mode: K/D/A detection (tesseract OCR)
+
+Gaming mode reads the Dota 2 HUD to place kills/deaths/assists markers on the play bar and to
+cut the time you spend dead. Two things are detected from the HUD:
+
+- **Death cuts** — driven by the golden respawn-box under your portrait. This works **without
+  OCR** (pure colour detection), so basic death-cutting needs no extra setup.
+- **K/D/A markers** — read from the top-left `K / D / A` counter with OCR. The
+  "Detect K/D/A markers" button (and the OCR-anchored death start times) require the
+  **`tesseract` OCR engine** to be installed on the system.
+
+The Python wrapper `pytesseract` is already installed by `uv pip install -e .`, but it shells
+out to the native `tesseract` binary, which is a **separate system package**. Without it the
+server logs `tesseract unavailable; skipping K/D/A markers`, and only death (`D`) markers appear.
+
+### Ubuntu / WSL
+
+```bash
+sudo apt update
+sudo apt install -y tesseract-ocr
+tesseract --version        # verify the engine is installed (apt puts it on PATH at /usr/bin)
+```
+
+Confirm the app can see it (run from the repo root, with the project env active):
+
+```bash
+python -c "import pytesseract; print('tesseract', pytesseract.get_tesseract_version())"
+```
+
+Then **restart the backend** (`python run_server.py`). In gaming mode, open the **Highlights**
+tab and click **Detect K/D/A markers** — the play bar fills with green `K`, red `D`, and blue
+`A` markers, and death cuts now start at the exact deaths-counter increment.
+
+> The backend resolves the binary via `PATH` and a few common locations
+> (`/usr/bin/tesseract`, `/usr/local/bin/tesseract`, `/opt/homebrew/bin/tesseract`), so the
+> default `apt` install location works out of the box. If you installed `tesseract` somewhere
+> non-standard, make sure it is on the `PATH` of the shell that launches the server.
+
+**macOS:** `brew install tesseract`. **Windows (native):** install the
+[UB Mannheim tesseract build](https://github.com/UB-Mannheim/tesseract/wiki) and ensure
+`tesseract.exe` is on your `PATH` — though running the backend under WSL and using the `apt`
+install above is usually simpler.
+
 ## API Documentation
 
 See [backend/README.md](backend/README.md) for detailed API documentation and usage examples.
