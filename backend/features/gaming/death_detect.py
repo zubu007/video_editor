@@ -98,9 +98,9 @@ class DotaHudLayout:
     respawn_y1: int = 74
     respawn_half: int = 30
     radiant_centers: tuple[int, ...] = (564, 634, 696, 755, 816)
-    # Dire (right-of-score) slot centres are not yet calibrated on sample
-    # footage; radiant is the validated default.
-    dire_centers: tuple[int, ...] = ()
+    # Dire slots mirror Radiant about the frame centre (measured on sample
+    # footage via the player-colour bars: symmetric to within ~1px).
+    dire_centers: tuple[int, ...] = (1098, 1160, 1222, 1284, 1346)
 
     def scaled(self, width: int, height: int) -> DotaHudLayout:
         """Return a copy scaled from the calibrated size to ``width x height``."""
@@ -165,13 +165,36 @@ def _ffmpeg_exe() -> str:
 
 def _video_dimensions(video_path: str | Path) -> tuple[int, int]:
     """Return the ``(width, height)`` of a video via ffprobe/ffmpeg metadata."""
+    width, height, _ = _video_metadata(video_path)
+    return width, height
+
+
+def _video_metadata(video_path: str | Path) -> tuple[int, int, float]:
+    """Return the ``(width, height, duration_seconds)`` of a video."""
     from moviepy import VideoFileClip
 
     clip = VideoFileClip(str(video_path))
     try:
-        return int(clip.w), int(clip.h)
+        return int(clip.w), int(clip.h), float(clip.duration or 0.0)
     finally:
         clip.close()
+
+
+def _default_sample_times(duration: float, count: int = 14) -> list[float]:
+    """Sample times spread across the middle of the recording.
+
+    Recordings often include the pick phase and pre-game strategy screen, where
+    the top bar uses entirely different layouts (draft cards, lane assignments)
+    — sampling there poisons the slot vote. The portrait slots are fixed for the
+    whole match, so the mid-game stretch (25–85% of the duration) is both safe
+    and representative. Falls back to an early-game spread when the duration is
+    unknown.
+    """
+    if duration <= 0:
+        return [float(t) for t in range(40, 200, 12)]
+    lo, hi = 0.25 * duration, 0.85 * duration
+    step = (hi - lo) / max(count - 1, 1)
+    return [lo + i * step for i in range(count)]
 
 
 def _extract_frame(
@@ -262,18 +285,18 @@ def identify_player_slot(
         layout: HUD geometry; defaults to the calibrated layout scaled to the
             video's resolution.
         team: The player's team (``"radiant"`` or ``"dire"``).
-        sample_times: Seconds to sample; defaults to a spread across the early
-            game.
+        sample_times: Seconds to sample; defaults to a spread across the middle
+            of the recording (avoiding pick-phase/pre-game HUD layouts).
 
     Returns:
         tuple[int, float]: ``(slot_index, confidence)`` — the 0-based slot and a
         vote-share confidence in ``[0, 1]``. Confidence 0 means no confident vote.
     """
-    width, height = _video_dimensions(video_path)
+    width, height, duration = _video_metadata(video_path)
     layout = (layout or DotaHudLayout()).scaled(width, height)
     centers = layout.team_centers(team)
     if sample_times is None:
-        sample_times = [float(t) for t in range(40, 200, 12)]
+        sample_times = _default_sample_times(duration)
 
     votes: Counter[int] = Counter()
     weight = 0.0
@@ -314,14 +337,15 @@ def extract_slot_previews(
         team: The player's team (``"radiant"`` or ``"dire"``).
         layout: HUD geometry; defaults to the calibrated layout for the video's
             resolution.
-        sample_time: Frame time to cut the thumbnails from; defaults to an early
-            in-game moment where portraits are clearly visible.
+        sample_time: Frame time to cut the thumbnails from; defaults to a
+            mid-game moment where the standard top bar (not a pick-phase or
+            pre-game layout) is on screen.
 
     Returns:
         tuple[int, float, list[np.ndarray]]: ``(auto_slot, confidence, thumbs)``
         where ``thumbs`` are BGR crops of the five team portraits in slot order.
     """
-    width, height = _video_dimensions(video_path)
+    width, height, duration = _video_metadata(video_path)
     layout = (layout or DotaHudLayout()).scaled(width, height)
     centers = layout.team_centers(team)
 
@@ -331,7 +355,7 @@ def extract_slot_previews(
         auto_slot, confidence = -1, 0.0
 
     if sample_time is None:
-        sample_time = 90.0
+        sample_time = 0.4 * duration if duration > 0 else 90.0
     frame = _extract_frame(video_path, sample_time, width, height)
     # Slightly enlarged portrait crop (whole icon, not just the face) for display.
     pad_x = layout.top_half + round(6 * width / layout.width)

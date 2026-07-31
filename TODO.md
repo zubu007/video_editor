@@ -38,9 +38,21 @@ recording to calibrate CV thresholds before implementation.
    - Ultra-short early respawns (~<5s, e.g. the sample's first death ~177s) are
      intentionally skipped — not worth cutting.
    - Coordinates/thresholds live in `DotaHudLayout` (calibrated 1920×1080,
-     `.scaled()` for other resolutions). Dire (right-side) slot centres are NOT
-     yet calibrated — only Radiant. Tests: `backend/tests/test_death_detect.py`
-     (pure fns; full-video test gated behind `DEATH_DETECT_SLOW`).
+     `.scaled()` for other resolutions). Dire slot centres are calibrated too
+     (measured from the sample footage's top bar via the player-colour strips;
+     symmetric to Radiant about the frame centre within ~1px). Tests:
+     `backend/tests/test_death_detect.py` (pure fns; full-video test gated
+     behind `DEATH_DETECT_SLOW`).
+   - **Gold respawn box = the local player's box only.** A dead *teammate's*
+     countdown box is plain grey (verified on the sample: the player's own box
+     is gold-bordered, a teammate's is not, same game) — which is why teammate
+     deaths don't false-positive. Assumed to hold for a Dire local player;
+     not yet verified against a Dire-side recording.
+   - **Slot auto-ID samples mid-game (25–85% of duration), not the first 3
+     minutes.** Recordings that include the pick phase / pre-game strategy
+     screens have completely different top-bar layouts there (draft cards with
+     gold rank medals that also fake out the respawn-box signal), which
+     poisoned the vote and returned a confidently wrong slot.
 
    **App wiring (done):**
    - "Edit a gaming video" start card → normal upload flow with `isGaming` set →
@@ -58,8 +70,13 @@ recording to calibrate CV thresholds before implementation.
      match is wrong or teamfight deaths confuse auto-ID.
 
    **Still open:**
-   - Calibrate Dire (right-side) slot centres in `DotaHudLayout` — only Radiant
-     is done; picking Dire in the UI currently raises until calibrated.
+   - Verify death detection on a real Dire-side recording (centres are
+     calibrated and the gold box is believed to be the local player's marker on
+     both teams, but no Dire footage has been through the pipeline yet).
+   - Pick-phase gold rank medals can register as a false "death" run at the very
+     start of a recording if they land under the chosen slot centre (observed
+     under a mid-bar slot; the sample's slot 4 escapes it). Consider ignoring
+     respawn runs that begin before the first K/D/A read or clock detection.
    - Optional: auto-detect team; padding control for the death cuts; a progress
      signal during the ~90s scan (currently indeterminate "Scanning…").
 

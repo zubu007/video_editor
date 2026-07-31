@@ -155,8 +155,10 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   `POST /api/gaming/detect-deaths/{file_id}` → poll `GET /api/gaming/death-detect/status/{job_id}`;
   `GET /api/gaming/slot-preview/{file_id}` returns the auto slot + 5 base64 portrait thumbnails for
   a **manual slot selector** (override the auto-match when it's wrong). Detected ranges save as
-  `cut` EditOperations (`source="death_detection"`). Only Radiant slot centres are calibrated; see
-  [TODO.md](TODO.md) item 3 for findings and open work (Dire calibration).
+  `cut` EditOperations (`source="death_detection"`). Both teams' slot centres are calibrated
+  (Dire mirrors Radiant about the frame centre); slot auto-ID samples the mid-game stretch
+  (25–85% of duration) because pick-phase/pre-game top-bar layouts poison the colour vote. See
+  [TODO.md](TODO.md) item 3 for findings and remaining open work (Dire-side footage validation).
 - `gaming/reel_crop.py` — reframes a highlight clip as a **square reel** for the "Highlights" tab.
   A centred crop takes the frame to 1:1 (equal bands off each side), which keeps the top hero bar
   and the bottom hero/ability/item panel but discards the minimap and K/D/A readout; both are
