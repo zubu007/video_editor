@@ -39,6 +39,9 @@ class DeathDetectJob:
     events: list[dict] = field(default_factory=list)
     player_slot: Optional[int] = None
     confidence: Optional[float] = None
+    # Whether the K/A OCR pass actually ran (tesseract available). When False,
+    # only death ("D") markers are produced even if K/D/A was requested.
+    kda_available: bool = False
     error: Optional[str] = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
@@ -103,6 +106,7 @@ def run_death_detect_job(
             events=result["events"],
             player_slot=result["player_slot"],
             confidence=result["confidence"],
+            kda_available=result.get("kda_available", False),
         )
         logger.info(
             "Death detection job %s done: slot %s, %d deaths, %d events",

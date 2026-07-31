@@ -17,6 +17,7 @@ from backend.features.gaming.death_detect import (
     DotaHudLayout,
     _colour_signature,
     _death_event_times,
+    _death_intervals_from_runs,
     _match_slot,
     _ocr_kda,
     _respawn_signal,
@@ -119,6 +120,36 @@ def test_death_event_times_finds_increments():
     times = [0, 1, 2, 3, 4]
     deaths = [0, 0, 1, 1, 2]
     assert _death_event_times(deaths, times) == [2, 4]
+
+
+def test_death_intervals_use_ocr_start_and_respawn_end():
+    # Respawn box gives the reliable window; the deaths-counter increment (a
+    # couple of seconds inside the match window) pins the start, the box the end.
+    runs = [{"start": 100.0, "end": 110.0}, {"start": 200.0, "end": 214.0}]
+    intervals = _death_intervals_from_runs(runs, [102.0, 199.0])
+    assert intervals == [
+        {"start": 102.0, "end": 110.0},  # OCR start replaces the respawn start
+        {"start": 199.0, "end": 214.0},
+    ]
+
+
+def test_death_intervals_keep_respawn_start_without_a_match():
+    # No OCR increment (tesseract off) or none within the match window → the
+    # respawn-box start is kept so the death is still cut.
+    runs = [{"start": 100.0, "end": 110.0}]
+    assert _death_intervals_from_runs(runs, []) == [{"start": 100.0, "end": 110.0}]
+    far = _death_intervals_from_runs(runs, [50.0])  # outside _DEATH_MATCH_WINDOW
+    assert far == [{"start": 100.0, "end": 110.0}]
+
+
+def test_death_intervals_consume_each_increment_once():
+    # Two close deaths must not both snap to the same increment.
+    runs = [{"start": 100.0, "end": 106.0}, {"start": 107.0, "end": 113.0}]
+    intervals = _death_intervals_from_runs(runs, [101.0, 108.0])
+    assert intervals == [
+        {"start": 101.0, "end": 106.0},
+        {"start": 108.0, "end": 113.0},
+    ]
 
 
 # ---------------------------------------------------------------- respawn signal

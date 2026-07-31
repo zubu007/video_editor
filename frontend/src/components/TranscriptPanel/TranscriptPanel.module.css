@@ -101,6 +101,51 @@
   color: var(--muted);
 }
 
+.loadingContainer .hint {
+  margin-top: 12px;
+  padding: 0 24px;
+  text-align: center;
+}
+
+.progressTrack {
+  width: 70%;
+  max-width: 260px;
+  height: 6px;
+  margin-top: 14px;
+  background-color: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background-color: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.startButton {
+  margin-top: 16px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+  background-color: var(--primary);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.startButton:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.startButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Custom scrollbar */
 .transcriptContent::-webkit-scrollbar {
   width: 8px;

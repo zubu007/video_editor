@@ -23,7 +23,8 @@ import {
   importYouTubeVideo,
   getVideoURL,
   getWaveformData,
-  extractWords,
+  startTranscription,
+  getTranscriptionStatus,
   detectAudioPauses,
   createProjectEdits,
   getProjectEdits,
@@ -44,7 +45,8 @@ import {
   getSlotPreview,
   startDeathDetection,
   getDeathDetectionStatus,
-  createHighlightClip,
+  startHighlightClip,
+  getHighlightClipStatus,
 } from './services/api';
 import './App.css';
 
@@ -52,6 +54,8 @@ import './App.css';
 const RENDER_POLL_INTERVAL_MS = 1000;
 // How often to poll a running death-detection job.
 const DEATH_POLL_INTERVAL_MS = 2000;
+// How often to poll a running transcription job.
+const TRANSCRIPT_POLL_INTERVAL_MS = 1500;
 
 function App() {
   const { settings, updateSetting } = useSettings();
@@ -80,6 +84,9 @@ function App() {
   const [hasSavedTimeline, setHasSavedTimeline] = useState(false);
   const [isSavingTimeline, setIsSavingTimeline] = useState(false);
   const [transcriptWords, setTranscriptWords] = useState([]);
+  // Word-level transcription runs as a manual background job (slow on long
+  // videos); this holds its 0.0-1.0 progress while isLoadingTranscript is true.
+  const [transcriptProgress, setTranscriptProgress] = useState(0);
   const [detectedPauses, setDetectedPauses] = useState([]);
   const [editOperations, setEditOperations] = useState([]);
   const [savedZoomEdits, setSavedZoomEdits] = useState([]);
@@ -159,8 +166,11 @@ function App() {
   const videoPlayerRef = useRef(null);
   const deathPollRef = useRef(null);
   const markerPollRef = useRef(null);
+  const highlightPollRef = useRef(null);
   // Holds the setInterval id for polling the active render job's status.
   const renderPollRef = useRef(null);
+  // Holds the setInterval id for polling the active transcription job.
+  const transcriptPollRef = useRef(null);
 
   // Append an editor-activity note to the assistant feed (readable log line).
   const logActivity = (content) => {
@@ -331,6 +341,7 @@ function App() {
     // and would otherwise keep polling a stale job, then inject that project's
     // result into this one when it finishes.
     stopRenderPolling();
+    stopTranscriptPolling();
     setIsRendering(false);
     setRenderProgress(0);
     setProjectId(null);
@@ -342,6 +353,8 @@ function App() {
     setHasSavedTimeline(false);
     activeSegmentIndexRef.current = 0;
     setTranscriptWords([]);
+    setIsLoadingTranscript(false);
+    setTranscriptProgress(0);
     setDetectedPauses([]);
     setEditOperations([]);
     setSavedZoomEdits([]);
@@ -373,6 +386,14 @@ function App() {
     setDeathSlots([]);
     setDeathSelectedSlot(null);
     setDeathCutsSaved(0);
+    stopMarkerPolling();
+    stopHighlightPolling();
+    setGamingEvents([]);
+    setMarkerStatus('idle');
+    setMarkerError(null);
+    setHighlightStatus('idle');
+    setHighlightError(null);
+    setHighlightResult(null);
   };
 
   // Given a backend response carrying file_id/project_id/media_asset_id (from either a
@@ -384,21 +405,32 @@ function App() {
     setMediaAssetId(response.media_asset_id);
     setVideoSrc(getVideoURL(response.file_id));
 
+    // Duration from the upload response is a reliable fallback so the timeline
+    // is usable immediately even if waveform generation is slow or fails.
+    let duration = response.duration || 0;
+    setSourceDuration(duration);
+
+    // Load the waveform on its own. It is decoupled from transcription (which is
+    // now a manual, potentially long-running job) so that one failing or being
+    // slow never discards the other — the previous Promise.all coupled them and
+    // a failed waveform threw away an already-extracted transcript.
     setIsLoadingWaveform(true);
-    setIsLoadingTranscript(true);
+    try {
+      const waveform = await getWaveformData(response.file_id, 2000);
+      setWaveformData(waveform.waveform);
+      if (waveform.duration) {
+        duration = waveform.duration;
+        setSourceDuration(waveform.duration);
+      }
+    } catch (error) {
+      console.error('Error loading waveform:', error);
+    } finally {
+      setIsLoadingWaveform(false);
+    }
 
-    const [waveform, transcript] = await Promise.all([
-      getWaveformData(response.file_id, 2000),
-      extractWords(response.file_id, 'base'),
-    ]);
-
-    setWaveformData(waveform.waveform);
-    setSourceDuration(waveform.duration);
-    setTranscriptWords(transcript.words || []);
     logActivity(
-      `Video loaded (${waveform.duration.toFixed(1)}s). Transcript extracted with ${
-        (transcript.words || []).length
-      } words.`
+      `Video loaded (${duration.toFixed(1)}s). Open the Transcript tab and click ` +
+        `"Start transcription" when you want the transcript.`
     );
     const edits = await getProjectEdits(response.project_id);
     applyLoadedEdits(edits.edits);
@@ -416,7 +448,7 @@ function App() {
       setHasSavedTimeline(true);
     } else {
       setTimelineSegments([
-        { id: crypto.randomUUID(), start: 0, end: waveform.duration },
+        { id: crypto.randomUUID(), start: 0, end: duration },
       ]);
       setHasSavedTimeline(false);
     }
@@ -1435,6 +1467,60 @@ function App() {
     }
   };
 
+  // Transcription is a manual, potentially long-running background job: start it
+  // from the Transcript tab, then poll for progress and the final words. The
+  // interval id lives in transcriptPollRef (cleared on done/error/unmount).
+  const stopTranscriptPolling = () => {
+    if (transcriptPollRef.current) {
+      clearInterval(transcriptPollRef.current);
+      transcriptPollRef.current = null;
+    }
+  };
+
+  const handleStartTranscription = async () => {
+    if (!fileId) return;
+
+    stopTranscriptPolling();
+    setIsLoadingTranscript(true);
+    setTranscriptProgress(0);
+    setToolError(null);
+    logActivity('Started transcription…');
+
+    try {
+      const { job_id: jobId } = await startTranscription(fileId, 'base');
+      transcriptPollRef.current = setInterval(async () => {
+        try {
+          const status = await getTranscriptionStatus(jobId);
+          setTranscriptProgress(status.progress || 0);
+          if (status.status === 'done') {
+            stopTranscriptPolling();
+            setTranscriptProgress(1);
+            setTranscriptWords(status.words || []);
+            setIsLoadingTranscript(false);
+            logActivity(
+              `Transcript extracted with ${(status.words || []).length} words.`
+            );
+          } else if (status.status === 'error') {
+            stopTranscriptPolling();
+            setToolError(status.error || 'Could not transcribe the video.');
+            setIsLoadingTranscript(false);
+            logActivity('Transcription failed.');
+          }
+        } catch (error) {
+          stopTranscriptPolling();
+          console.error('Error polling transcription status:', error);
+          setToolError('Lost contact with the transcription job.');
+          setIsLoadingTranscript(false);
+        }
+      }, TRANSCRIPT_POLL_INTERVAL_MS);
+    } catch (error) {
+      console.error('Error starting transcription:', error);
+      setToolError('Could not start transcription.');
+      setIsLoadingTranscript(false);
+      logActivity('Transcription failed.');
+    }
+  };
+
   const handleRenderProject = async () => {
     if (!projectId) return;
 
@@ -1486,6 +1572,12 @@ function App() {
   // Stop any in-flight render polling if the app unmounts.
   useEffect(() => stopRenderPolling, []);
 
+  // Stop any in-flight transcription polling if the app unmounts.
+  useEffect(() => stopTranscriptPolling, []);
+
+  // Stop any in-flight highlight-clip polling if the app unmounts.
+  useEffect(() => stopHighlightPolling, []);
+
   // --- Dota 2 death detection ---------------------------------------------
   const stopDeathPolling = () => {
     if (deathPollRef.current) {
@@ -1525,7 +1617,27 @@ function App() {
           if (status.status === 'done') {
             stopMarkerPolling();
             setGamingEvents(status.events || []);
+            // The same scan also yields the dead intervals — start anchored on
+            // the K/D/A deaths increment, end on the respawn box. Feed them to
+            // the Death cuts panel so "Add cuts" cuts from these OCR-timed
+            // deaths without a second scan.
+            setDeathIntervals(status.intervals || []);
+            setDeathStatus('done');
+            if (status.player_slot != null) setDeathPlayerSlot(status.player_slot);
+            if (status.confidence != null) setDeathConfidence(status.confidence);
             setMarkerStatus('done');
+            // Kills/assists need the tesseract OCR pass; deaths don't. If OCR
+            // was unavailable on the server, only "D" markers come back — say so
+            // instead of silently showing deaths only.
+            if (status.kda_available === false) {
+              setMarkerError(
+                'Only death markers were detected — kills/assists need tesseract ' +
+                  'OCR, which is unavailable on the server. Install tesseract to ' +
+                  'enable K/A markers.'
+              );
+            } else {
+              setMarkerError(null);
+            }
             logActivity(
               `Placed ${(status.events || []).length} K/D/A markers on the play bar.`
             );
@@ -1651,7 +1763,16 @@ function App() {
     else setHighlightEnd(value);
   };
 
+  const stopHighlightPolling = () => {
+    if (highlightPollRef.current) {
+      clearInterval(highlightPollRef.current);
+      highlightPollRef.current = null;
+    }
+  };
+
   // Trim a quick clip between the start/end fields into a downloadable file.
+  // Re-encoding scales with the clip length, so it runs as a background job:
+  // start it, then poll for the finished clip while the user keeps editing.
   const handleCreateHighlight = async () => {
     if (!fileId) return;
     const start = parseFloat(highlightStart);
@@ -1661,16 +1782,42 @@ function App() {
       setHighlightStatus('error');
       return;
     }
+    stopHighlightPolling();
     setHighlightStatus('creating');
     setHighlightError(null);
     setHighlightResult(null);
     try {
-      const clip = await createHighlightClip(fileId, start, end);
-      setHighlightResult(clip);
-      setHighlightStatus('done');
-      logActivity(`Created a ${clip.duration.toFixed(1)}s highlight clip.`);
+      const { job_id: jobId } = await startHighlightClip(fileId, start, end);
+      highlightPollRef.current = setInterval(async () => {
+        try {
+          const status = await getHighlightClipStatus(jobId);
+          if (status.status === 'done') {
+            stopHighlightPolling();
+            setHighlightResult({
+              filename: status.filename,
+              output_url: status.output_url,
+              duration: status.duration,
+            });
+            setHighlightStatus('done');
+            logActivity(
+              `Created a ${status.duration.toFixed(1)}s highlight clip.`
+            );
+          } else if (status.status === 'error') {
+            stopHighlightPolling();
+            setHighlightError(
+              status.error || 'Could not create the highlight clip.'
+            );
+            setHighlightStatus('error');
+          }
+        } catch (error) {
+          stopHighlightPolling();
+          console.error('Error polling highlight status:', error);
+          setHighlightError('Lost contact with the highlight job.');
+          setHighlightStatus('error');
+        }
+      }, DEATH_POLL_INTERVAL_MS);
     } catch (error) {
-      console.error('Error creating highlight clip:', error);
+      console.error('Error starting highlight clip:', error);
       setHighlightError(
         error?.response?.data?.detail || 'Could not create the highlight clip.'
       );
@@ -1689,8 +1836,11 @@ function App() {
   const resetProjectState = () => {
     // Stop tracking the outgoing project's render before tearing its state down.
     stopRenderPolling();
+    stopTranscriptPolling();
     setIsRendering(false);
     setRenderProgress(0);
+    setIsLoadingTranscript(false);
+    setTranscriptProgress(0);
     if (videoSrc?.startsWith('blob:')) {
       URL.revokeObjectURL(videoSrc);
     }
@@ -1738,6 +1888,7 @@ function App() {
     setDeathSelectedSlot(null);
     setDeathCutsSaved(0);
     stopMarkerPolling();
+    stopHighlightPolling();
     setGamingEvents([]);
     setMarkerStatus('idle');
     setMarkerError(null);
@@ -1873,6 +2024,7 @@ function App() {
               isDirty={timelineDirty}
               isSaving={isSavingTimeline}
               overlays={timelineOverlays}
+              markers={isGaming ? gamingEvents : []}
               selectedSegmentId={
                 inspectorSelection?.kind === 'segment' ? inspected.id : null
               }
@@ -1917,7 +2069,11 @@ function App() {
               </div>
               {isUploading && <span>Uploading {uploadProgress}%</span>}
               {isLoadingWaveform && <span>Generating waveform...</span>}
-              {isLoadingTranscript && <span>Extracting transcript...</span>}
+              {isLoadingTranscript && (
+                <span>
+                  Transcribing… {Math.round(transcriptProgress * 100)}%
+                </span>
+              )}
               <button className="text-button" onClick={resetProjectState}>
                 Change Video
               </button>
@@ -2167,6 +2323,9 @@ function App() {
                   currentTime={currentTime}
                   onSeek={handleSeek}
                   loading={isLoadingTranscript}
+                  progress={transcriptProgress}
+                  hasFile={Boolean(fileId)}
+                  onStartTranscription={handleStartTranscription}
                 />
               )}
               </div>
