@@ -20,6 +20,8 @@ from typing import Literal, Optional
 
 import imageio_ffmpeg
 
+from backend.features.gaming.reel_crop import REEL_OUTPUT_LABEL, reel_filter_for_video
+
 logger = logging.getLogger(__name__)
 
 JobStatus = Literal["pending", "running", "done", "error"]
@@ -80,36 +82,64 @@ def run_highlight_job(
     end: float,
     output_path: str,
     output_filename: str,
+    square: bool = False,
 ) -> None:
     """Trim ``source[start:end]`` into ``output_path`` with ffmpeg.
 
     Runs in a background thread. Re-encodes with a fast seek + veryfast preset
     (frame-accurate at the cut) and records the resulting download URL on the
     job, mirroring the other background-job workers.
+
+    Args:
+        job_id: The job to report progress on.
+        video_path: Source recording.
+        start: Clip start in source seconds.
+        end: Clip end in source seconds.
+        output_path: Where to write the clip.
+        output_filename: Basename used to build the download URL.
+        square: Reframe the clip to a square reel — an equal-sided centre crop
+            with the minimap and K/D/A readouts lifted from the discarded bands
+            and composited back on (see :mod:`backend.features.gaming.reel_crop`).
+            The reframe rides along in the same re-encode pass.
     """
     update_job(job_id, status="running")
     duration = round(end - start, 3)
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    command = [
-        ffmpeg,
-        "-y",
-        "-ss",
-        f"{start:.3f}",
-        "-i",
-        str(video_path),
-        "-t",
-        f"{duration:.3f}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
     try:
+        reframe: list[str] = []
+        if square:
+            # Probing and planning happen inside the try so an unusable source
+            # (e.g. a portrait recording) lands on the job as an error message.
+            reframe = [
+                "-filter_complex",
+                reel_filter_for_video(video_path),
+                "-map",
+                f"[{REEL_OUTPUT_LABEL}]",
+                # filter_complex disables automatic stream selection; keep audio
+                # if the source has any.
+                "-map",
+                "0:a?",
+            ]
+        command = [
+            ffmpeg,
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            str(video_path),
+            "-t",
+            f"{duration:.3f}",
+            *reframe,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
         subprocess.run(command, check=True, capture_output=True, text=True)
         update_job(
             job_id,

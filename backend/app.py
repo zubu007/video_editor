@@ -730,6 +730,13 @@ class HighlightClipRequest(BaseModel):
 
     start: float = Field(..., ge=0, description="Clip start in source seconds")
     end: float = Field(..., gt=0, description="Clip end in source seconds")
+    square: bool = Field(
+        False,
+        description=(
+            "Reframe to a square reel: equal-sided centre crop with the minimap "
+            "and K/D/A readouts composited back on. Landscape sources only."
+        ),
+    )
 
 
 class HighlightClipResponse(BaseModel):
@@ -2646,8 +2653,9 @@ async def create_highlight_clip(
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    shape = "square" if request.square else "wide"
     output_filename = (
-        f"highlight_{file_id}_{int(request.start)}-{int(request.end)}_"
+        f"highlight_{file_id}_{int(request.start)}-{int(request.end)}_{shape}_"
         f"{uuid.uuid4().hex[:8]}.mp4"
     )
     output_path = OUTPUT_DIR / output_filename
@@ -2661,13 +2669,15 @@ async def create_highlight_clip(
         request.end,
         str(output_path),
         output_filename,
+        request.square,
     )
     logger.info(
-        "Started highlight job %s for file %s (%.2f-%.2fs)",
+        "Started highlight job %s for file %s (%.2f-%.2fs, %s)",
         job.job_id,
         file_id,
         request.start,
         request.end,
+        shape,
     )
     return HighlightClipStartResponse(job_id=job.job_id, status=job.status)
 

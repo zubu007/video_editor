@@ -15,6 +15,7 @@ export default function HighlightsPanel({
   currentTime,
   start,
   end,
+  square, // reframe the clip to a square reel
   status, // 'idle' | 'creating' | 'done' | 'error'
   error,
   result, // { filename, output_url, duration } once created
@@ -34,6 +35,7 @@ export default function HighlightsPanel({
   onDetectMarkers,
   onChangeStart,
   onChangeEnd,
+  onChangeSquare,
   onSetToPlayhead,
   onCreate,
 }) {
@@ -196,6 +198,25 @@ export default function HighlightsPanel({
       {validRange && (
         <p className={styles.hint}>
           Clip length: {formatTime(endNum - startNum)}
+        </p>
+      )}
+
+      <label className={styles.toggle}>
+        <input
+          type="checkbox"
+          checked={square}
+          disabled={!hasVideo || creating}
+          onChange={(event) => onChangeSquare(event.target.checked)}
+        />
+        <span>
+          <strong>Crop to square for reels</strong>
+          Trims equally from both sides, then puts the minimap back in the
+          bottom-left corner and K/D&#47;A below the hero bar.
+        </span>
+      </label>
+      {square && (
+        <p className={styles.hint}>
+          Needs a landscape recording with the standard Dota HUD.
         </p>
       )}
 
