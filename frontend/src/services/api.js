@@ -558,12 +558,14 @@ export async function getDeathDetectionStatus(jobId) {
  * @param {string} fileId - Uploaded video file_id
  * @param {number} start - Clip start in source seconds
  * @param {number} end - Clip end in source seconds
+ * @param {boolean} [square] - Reframe to a square reel (centre crop with the
+ *   minimap and K/D/A composited back on). Landscape sources only.
  * @returns {Promise<{job_id: string, status: string}>}
  */
-export async function startHighlightClip(fileId, start, end) {
+export async function startHighlightClip(fileId, start, end, square = false) {
   const response = await apiClient.post(
     `/api/gaming/highlight-clip/${fileId}`,
-    { start, end }
+    { start, end, square }
   );
   return response.data;
 }

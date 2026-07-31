@@ -160,6 +160,8 @@ function App() {
   // "Highlights" tab: trim a quick clip between two source timestamps.
   const [highlightStart, setHighlightStart] = useState('');
   const [highlightEnd, setHighlightEnd] = useState('');
+  // Square reframe is the default: highlights from here are posted as reels.
+  const [highlightSquare, setHighlightSquare] = useState(true);
   const [highlightStatus, setHighlightStatus] = useState('idle'); // idle|creating|done|error
   const [highlightError, setHighlightError] = useState(null);
   const [highlightResult, setHighlightResult] = useState(null);
@@ -1787,7 +1789,12 @@ function App() {
     setHighlightError(null);
     setHighlightResult(null);
     try {
-      const { job_id: jobId } = await startHighlightClip(fileId, start, end);
+      const { job_id: jobId } = await startHighlightClip(
+        fileId,
+        start,
+        end,
+        highlightSquare
+      );
       highlightPollRef.current = setInterval(async () => {
         try {
           const status = await getHighlightClipStatus(jobId);
@@ -2206,6 +2213,7 @@ function App() {
                   currentTime={currentTime}
                   start={highlightStart}
                   end={highlightEnd}
+                  square={highlightSquare}
                   status={highlightStatus}
                   error={highlightError}
                   result={highlightResult}
@@ -2225,6 +2233,7 @@ function App() {
                   onDetectMarkers={handleDetectMarkers}
                   onChangeStart={setHighlightStart}
                   onChangeEnd={setHighlightEnd}
+                  onChangeSquare={setHighlightSquare}
                   onSetToPlayhead={handleSetHighlightToPlayhead}
                   onCreate={handleCreateHighlight}
                 />
