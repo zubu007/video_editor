@@ -50,6 +50,16 @@ from backend.features.gaming.jobs import (
     get_job as get_death_detect_job,
     run_death_detect_job,
 )
+from backend.features.transcript.jobs import (
+    create_job as create_transcript_job,
+    get_job as get_transcript_job,
+    run_transcript_job,
+)
+from backend.features.gaming.highlight_jobs import (
+    create_job as create_highlight_job,
+    get_job as get_highlight_job,
+    run_highlight_job,
+)
 from backend.features.captions import (
     DEFAULT_STYLE as DEFAULT_CAPTION_STYLE,
     STYLE_PRESETS as CAPTION_STYLE_PRESETS,
@@ -250,6 +260,23 @@ class TranscriptWordsResponse(BaseModel):
 
     language: Optional[str] = None
     words: list[TranscriptWord] = []
+
+
+class TranscriptJobStartResponse(BaseModel):
+    """Response returned when a background transcription job is started."""
+
+    job_id: str = Field(..., description="Poll this to track the job")
+    status: str = Field(..., description="Job status (pending/running/done/error)")
+
+
+class TranscriptJobStatusResponse(BaseModel):
+    """Status of a background transcription job."""
+
+    job_id: str
+    status: str = Field(..., description="pending, running, done, or error")
+    progress: float = Field(0.0, description="0.0-1.0 completion fraction")
+    words: list[TranscriptWord] = []
+    error: Optional[str] = None
 
 
 class FillerWordsResponse(BaseModel):
@@ -686,6 +713,13 @@ class DeathDetectStatusResponse(BaseModel):
         None,
         description="Auto-identification confidence in [0, 1] (null if overridden)",
     )
+    kda_available: bool = Field(
+        False,
+        description=(
+            "Whether the K/A OCR pass ran (tesseract available). When false, only "
+            "death markers are produced even if K/D/A was requested."
+        ),
+    )
     error: Optional[str] = Field(
         None, description="Failure detail when status is 'error'"
     )
@@ -704,6 +738,26 @@ class HighlightClipResponse(BaseModel):
     filename: str
     output_url: str = Field(..., description="URL to fetch the clip from")
     duration: float = Field(..., description="Clip length in seconds")
+
+
+class HighlightClipStartResponse(BaseModel):
+    """Response returned when a background highlight-clip job is started."""
+
+    job_id: str = Field(..., description="Poll this to track the job")
+    status: str = Field(..., description="Job status (pending/running/done/error)")
+
+
+class HighlightClipStatusResponse(BaseModel):
+    """Status of a background highlight-clip job."""
+
+    job_id: str
+    status: str = Field(..., description="pending, running, done, or error")
+    filename: Optional[str] = None
+    output_url: Optional[str] = Field(
+        None, description="Clip URL once status is 'done'"
+    )
+    duration: float = Field(0.0, description="Clip length in seconds")
+    error: Optional[str] = None
 
 
 class SlotPreviewResponse(BaseModel):
@@ -2563,19 +2617,26 @@ async def get_death_detection_status(job_id: str):
         events=[GamingEventResponse(**ev) for ev in job.events],
         player_slot=job.player_slot,
         confidence=job.confidence,
+        kda_available=job.kda_available,
         error=job.error,
     )
 
 
 @app.post(
-    "/api/gaming/highlight-clip/{file_id}", response_model=HighlightClipResponse
+    "/api/gaming/highlight-clip/{file_id}",
+    response_model=HighlightClipStartResponse,
 )
-async def create_highlight_clip(file_id: str, request: HighlightClipRequest):
-    """Trim a quick highlight clip from the source between two timestamps.
+async def create_highlight_clip(
+    file_id: str,
+    request: HighlightClipRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Start a background job that trims a highlight clip between two timestamps.
 
-    Re-encodes ``source[start:end]`` with ffmpeg (fast seek + veryfast preset,
-    frame-accurate at the cut) and returns a downloadable ``/api/renders`` URL —
-    handy for pulling a short clip out of a long gameplay recording.
+    Re-encoding ``source[start:end]`` with ffmpeg scales with the clip length, so
+    the work runs asynchronously instead of blocking the request. Poll
+    ``GET /api/gaming/highlight-clip/status/{job_id}`` for the downloadable
+    ``/api/renders`` URL once it is done.
     """
     if request.end <= request.start:
         raise HTTPException(status_code=400, detail="end must be greater than start")
@@ -2585,51 +2646,49 @@ async def create_highlight_clip(file_id: str, request: HighlightClipRequest):
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    duration = round(request.end - request.start, 3)
     output_filename = (
         f"highlight_{file_id}_{int(request.start)}-{int(request.end)}_"
         f"{uuid.uuid4().hex[:8]}.mp4"
     )
     output_path = OUTPUT_DIR / output_filename
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    command = [
-        ffmpeg,
-        "-y",
-        "-ss",
-        f"{request.start:.3f}",
-        "-i",
+    job = create_highlight_job(file_id)
+    background_tasks.add_task(
+        run_highlight_job,
+        job.job_id,
         str(video_path),
-        "-t",
-        f"{duration:.3f}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
+        request.start,
+        request.end,
         str(output_path),
-    ]
-    try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        logger.error("Highlight clip ffmpeg failed: %s", e.stderr)
-        raise HTTPException(
-            status_code=500, detail="Failed to create highlight clip"
-        )
-
-    logger.info(
-        "Created highlight clip %s (%.2fs) for file %s",
         output_filename,
-        duration,
-        file_id,
     )
-    return HighlightClipResponse(
-        filename=output_filename,
-        output_url=f"/api/renders/{output_filename}",
-        duration=duration,
+    logger.info(
+        "Started highlight job %s for file %s (%.2f-%.2fs)",
+        job.job_id,
+        file_id,
+        request.start,
+        request.end,
+    )
+    return HighlightClipStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get(
+    "/api/gaming/highlight-clip/status/{job_id}",
+    response_model=HighlightClipStatusResponse,
+)
+async def get_highlight_clip_status(job_id: str):
+    """Return the status and (when done) the download URL of a highlight job."""
+    job = get_highlight_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Highlight job not found")
+
+    return HighlightClipStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        filename=job.filename,
+        output_url=job.output_url,
+        duration=job.duration,
+        error=job.error,
     )
 
 
@@ -2890,6 +2949,59 @@ async def extract_transcript_words_by_id(
     except Exception as e:
         logger.error(f"Error extracting transcript: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/transcript/words/{file_id}/start",
+    response_model=TranscriptJobStartResponse,
+)
+async def start_transcript_job(
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    model_size: str = "base",
+):
+    """Start a background word-level transcription job over an uploaded video.
+
+    Transcription is CPU-bound and can take minutes on a long recording, so it
+    runs asynchronously instead of blocking the request. Poll
+    ``GET /api/transcript/words/status/{job_id}`` for progress and, once done,
+    the word-level transcript.
+    """
+    try:
+        video_path = find_uploaded_video(file_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    job = create_transcript_job(file_id, model_size)
+    background_tasks.add_task(
+        run_transcript_job, job.job_id, str(video_path), model_size
+    )
+    logger.info(
+        "Started transcription job %s for file %s (model=%s)",
+        job.job_id,
+        file_id,
+        model_size,
+    )
+    return TranscriptJobStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get(
+    "/api/transcript/words/status/{job_id}",
+    response_model=TranscriptJobStatusResponse,
+)
+async def get_transcript_job_status(job_id: str):
+    """Return the status, progress and (when done) words of a transcription job."""
+    job = get_transcript_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Transcription job not found")
+
+    return TranscriptJobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        words=[TranscriptWord(**word) for word in job.words],
+        error=job.error,
+    )
 
 
 # ============================================================================

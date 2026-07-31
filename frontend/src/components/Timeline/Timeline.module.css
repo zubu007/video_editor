@@ -134,7 +134,7 @@
 }
 
 .gutterRuler {
-  height: 18px;
+  height: 26px;
 }
 
 .gutterLane {
@@ -305,7 +305,7 @@
 
 .ruler {
   position: relative;
-  height: 18px;
+  height: 26px;
   cursor: pointer;
   overflow: hidden;
 }
@@ -316,6 +316,42 @@
   bottom: 0;
   border-left: 1px solid var(--border);
   pointer-events: none;
+}
+
+/* K/D/A event pins along the ruler (gaming mode). */
+.marker {
+  position: absolute;
+  bottom: 1px;
+  transform: translateX(-50%);
+  min-width: 15px;
+  height: 15px;
+  padding: 0 2px;
+  border: none;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  color: #ffffff;
+  text-align: center;
+  cursor: pointer;
+  z-index: 2;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.marker:hover {
+  filter: brightness(1.15);
+}
+
+.markerK {
+  background-color: #22c55e;
+}
+
+.markerD {
+  background-color: #ef4444;
+}
+
+.markerA {
+  background-color: #3b82f6;
 }
 
 .tick span {

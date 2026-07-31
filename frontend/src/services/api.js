@@ -90,6 +90,35 @@ export async function extractWords(fileId, modelSize = 'base') {
 }
 
 /**
+ * Start a background word-level transcription job.
+ * Transcription is CPU-bound and slow on long videos, so it runs as a job and
+ * is polled via getTranscriptionStatus rather than blocking a single request.
+ * @param {string} fileId - File ID
+ * @param {string} modelSize - Whisper model size
+ * @returns {Promise<{job_id: string, status: string}>}
+ */
+export async function startTranscription(fileId, modelSize = 'base') {
+  const response = await apiClient.post(
+    `/api/transcript/words/${fileId}/start`,
+    null,
+    { params: { model_size: modelSize } }
+  );
+
+  return response.data;
+}
+
+/**
+ * Poll the status of a background transcription job.
+ * @param {string} jobId - Job ID from startTranscription
+ * @returns {Promise<{job_id: string, status: string, progress: number, words: Array, error: string|null}>}
+ */
+export async function getTranscriptionStatus(jobId) {
+  const response = await apiClient.get(`/api/transcript/words/status/${jobId}`);
+
+  return response.data;
+}
+
+/**
  * Detect filler words in video
  * @param {string} fileId - File ID
  * @param {string} modelSize - Whisper model size
@@ -523,16 +552,30 @@ export async function getDeathDetectionStatus(jobId) {
 }
 
 /**
- * Trim a quick highlight clip from the source between two timestamps.
+ * Start a background job that trims a highlight clip between two timestamps.
+ * Re-encoding scales with the clip length, so this runs as a job and is polled
+ * via getHighlightClipStatus rather than blocking a single request.
  * @param {string} fileId - Uploaded video file_id
  * @param {number} start - Clip start in source seconds
  * @param {number} end - Clip end in source seconds
- * @returns {Promise<{filename: string, output_url: string, duration: number}>}
+ * @returns {Promise<{job_id: string, status: string}>}
  */
-export async function createHighlightClip(fileId, start, end) {
+export async function startHighlightClip(fileId, start, end) {
   const response = await apiClient.post(
     `/api/gaming/highlight-clip/${fileId}`,
     { start, end }
+  );
+  return response.data;
+}
+
+/**
+ * Poll the status of a background highlight-clip job.
+ * @param {string} jobId - Job ID from startHighlightClip
+ * @returns {Promise<{job_id: string, status: string, filename: string|null, output_url: string|null, duration: number, error: string|null}>}
+ */
+export async function getHighlightClipStatus(jobId) {
+  const response = await apiClient.get(
+    `/api/gaming/highlight-clip/status/${jobId}`
   );
   return response.data;
 }

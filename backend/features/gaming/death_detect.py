@@ -28,7 +28,9 @@ in the ``{"start", "end"}`` shape the rest of the pipeline speaks.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -379,12 +381,38 @@ def _stream_top_strip(video_path: str | Path, fps: float, width: int, strip_h: i
 
 
 def _ocr_available() -> bool:
+    """Whether tesseract OCR can run, configuring pytesseract's binary path.
+
+    The tesseract binary is often installed somewhere that isn't on the server
+    process's ``PATH`` — most commonly Homebrew's ``/opt/homebrew/bin`` on macOS
+    when the server is launched from a GUI or a minimal shell. When that happens
+    ``pytesseract`` can't find the binary and OCR is silently disabled, which
+    drops the K/A markers. We resolve the binary via ``shutil.which`` and a few
+    well-known locations and point pytesseract at it so OCR isn't skipped purely
+    because of ``PATH``.
+    """
     try:
         import pytesseract
+    except Exception:  # noqa: BLE001 - missing package disables OCR
+        return False
 
+    cmd = shutil.which("tesseract")
+    if cmd is None:
+        for candidate in (
+            "/opt/homebrew/bin/tesseract",
+            "/usr/local/bin/tesseract",
+            "/usr/bin/tesseract",
+        ):
+            if os.path.exists(candidate):
+                cmd = candidate
+                break
+    if cmd is not None:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+
+    try:
         pytesseract.get_tesseract_version()
         return True
-    except Exception:  # noqa: BLE001 - any import/binary failure disables OCR
+    except Exception:  # noqa: BLE001 - any binary failure disables OCR
         return False
 
 
@@ -499,6 +527,43 @@ def _death_event_times(deaths_series: list[int], times: list[float]) -> list[flo
     return events
 
 
+def _death_intervals_from_runs(
+    runs: list[dict], death_times: list[float]
+) -> list[dict]:
+    """Dead windows for cutting: OCR death moment as start, respawn box as end.
+
+    Each golden respawn-box run is a confirmed dead window with a reliable *end*.
+    When the K/D/A deaths counter was OCR'd, the exact moment of death is the
+    increment timestamp, so each run's *start* is replaced by the nearest deaths
+    increment within :data:`_DEATH_MATCH_WINDOW` (kept strictly before the run's
+    end). Runs with no matching increment keep their respawn-box start, so a
+    death the OCR missed is still cut. Each increment is consumed at most once.
+
+    Args:
+        runs: Golden respawn-box runs, each ``{"start", "end"}`` in seconds.
+        death_times: OCR deaths-counter increment timestamps (empty when OCR
+            did not run), in time order.
+
+    Returns:
+        list[dict]: ``{"start", "end"}`` dead windows in the order of ``runs``.
+    """
+    remaining = sorted(death_times)
+    intervals: list[dict] = []
+    for run in runs:
+        start = run["start"]
+        best_idx, best_dt = None, _DEATH_MATCH_WINDOW
+        for i, t in enumerate(remaining):
+            dt = abs(t - run["start"])
+            if dt <= best_dt:
+                best_idx, best_dt = i, dt
+        if best_idx is not None:
+            matched = remaining.pop(best_idx)
+            if matched < run["end"]:
+                start = matched
+        intervals.append({"start": start, "end": run["end"]})
+    return intervals
+
+
 def detect_death_intervals(
     video_path: str | Path,
     fps: float = 1.0,
@@ -594,19 +659,23 @@ def detect_gaming_markers(
 ) -> dict:
     """Single-pass detection of dead intervals plus K/D/A timeline markers.
 
-    Runs one HUD scan and derives two things from it: the player's dead intervals
-    (the golden respawn-box runs — identical logic to
-    :func:`detect_death_intervals`) and, when ``detect_kda`` is set and tesseract
-    is available, point markers for each kills/assists counter increment. Death
-    (``"D"``) markers are taken from the interval starts (the reliable respawn
-    signal), not the noisier deaths OCR.
+    Runs one HUD scan and derives two things from it. When ``detect_kda`` is set
+    and tesseract is available, all three K/D/A markers come from the top-left
+    counter's increments — kills, deaths *and* assists — and each dead interval
+    starts at its deaths-counter increment (the exact moment of death) while its
+    end still comes from the reliable golden respawn-box run
+    (:func:`_death_intervals_from_runs`). Without OCR (``detect_kda`` off or
+    tesseract missing) the respawn box alone drives both the intervals and the
+    ``"D"`` markers, exactly as :func:`detect_death_intervals`.
 
     Args:
         video_path: The gameplay recording (HUD visible).
         fps: Sampling rate in frames per second.
         team: The player's team (``"radiant"`` or ``"dire"``).
         player_slot: 0-based top-bar slot; auto-identified when ``None``.
-        detect_kda: When ``True`` and tesseract is available, emit K/A markers.
+        detect_kda: When ``True`` and tesseract is available, emit K/D/A markers
+            from the OCR'd counter and anchor each interval's start on its deaths
+            increment.
         layout: HUD geometry; defaults to the calibrated layout for the video.
 
     Returns:
@@ -638,11 +707,12 @@ def detect_gaming_markers(
 
     kda_on = detect_kda and _ocr_available()
     if detect_kda and not kda_on:
-        logger.warning("tesseract unavailable; skipping K/A markers")
+        logger.warning("tesseract unavailable; skipping K/D/A markers")
 
     times: list[float] = []
     respawn: list[float] = []
     kills_series: list[int] = []
+    deaths_series: list[int] = []
     assists_series: list[int] = []
     kda = (0, 0, 0)
     for t, strip in _stream_top_strip(video_path, fps, width, layout.strip_height):
@@ -651,6 +721,7 @@ def detect_gaming_markers(
         if kda_on:
             kda = _ocr_kda(_crop(strip, layout.kda_box), kda)
             kills_series.append(kda[0])
+            deaths_series.append(kda[1])
             assists_series.append(kda[2])
 
     if not times:
@@ -659,21 +730,32 @@ def detect_gaming_markers(
             "confidence": confidence,
             "intervals": [],
             "events": [],
+            "kda_available": kda_on,
         }
 
+    # Golden respawn-box runs are the confirmed dead windows (and reliable ends);
+    # when OCR ran, the deaths-counter increments pin each window's true start.
     runs = _signal_runs(times, respawn, _GOLD_FRACTION, _MIN_RESPAWN_SAMPLES)
-    intervals = [r for r in runs if r["end"] - r["start"] >= _MIN_DEATH_SECONDS]
+    runs = [r for r in runs if r["end"] - r["start"] >= _MIN_DEATH_SECONDS]
+    death_times = _death_event_times(deaths_series, times) if kda_on else []
+    intervals = _death_intervals_from_runs(runs, death_times)
     for run in intervals:
         run["duration"] = round(run["end"] - run["start"], 2)
         run["start"] = round(run["start"], 2)
         run["end"] = round(run["end"], 2)
 
-    events: list[dict] = [{"time": run["start"], "kind": "D"} for run in intervals]
+    # K/D/A markers all come from the OCR'd counter; without OCR the only signal
+    # is the respawn box, so deaths fall back to the interval starts.
     if kda_on:
+        events: list[dict] = []
         for t in _death_event_times(kills_series, times):
             events.append({"time": round(t, 2), "kind": "K"})
+        for t in death_times:
+            events.append({"time": round(t, 2), "kind": "D"})
         for t in _death_event_times(assists_series, times):
             events.append({"time": round(t, 2), "kind": "A"})
+    else:
+        events = [{"time": run["start"], "kind": "D"} for run in intervals]
     events.sort(key=lambda e: e["time"])
 
     return {
@@ -681,4 +763,5 @@ def detect_gaming_markers(
         "confidence": confidence,
         "intervals": intervals,
         "events": events,
+        "kda_available": kda_on,
     }

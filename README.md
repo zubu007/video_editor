@@ -2,6 +2,8 @@
 
 A simple video editing tool with a FastAPI backend for automated podcast video editing.
 
+![The Video Editor UI — gaming mode with K/D/A markers on the play bar](docs/editor-screenshot.png)
+
 ## Features
 
 - **Transcript Extraction**: Extract transcripts from videos using Whisper AI

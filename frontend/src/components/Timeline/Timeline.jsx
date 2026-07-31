@@ -91,6 +91,7 @@ function Timeline({
   isDirty,
   isSaving,
   overlays = [],
+  markers = [],
   selectedSegmentId = null,
   selectedOverlayId = null,
   onSeek,
@@ -236,6 +237,33 @@ function Timeline({
     });
     return pieces.sort((a, b) => a.tStart - b.tStart);
   };
+
+  // K/D/A event pins, positioned in timeline time. A marker whose source time
+  // falls inside a deleted/cut range (no segment contains it) maps to null and
+  // is simply not drawn. The source→timeline lookup is inlined here so the memo
+  // dependencies stay self-contained.
+  const markerPins = useMemo(() => {
+    if (totalDuration <= 0) return [];
+    return markers
+      .map((marker, index) => {
+        let timelineTime = null;
+        for (let i = 0; i < segments.length; i += 1) {
+          const segment = segments[i];
+          if (marker.time >= segment.start && marker.time < segment.end) {
+            timelineTime = offsets[i] + (marker.time - segment.start);
+            break;
+          }
+        }
+        if (timelineTime === null) return null;
+        return {
+          key: `${marker.kind}-${marker.time}-${index}`,
+          kind: marker.kind,
+          time: marker.time,
+          left: (timelineTime / totalDuration) * 100,
+        };
+      })
+      .filter(Boolean);
+  }, [markers, segments, offsets, totalDuration]);
 
   const handleRulerClick = (event) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -549,6 +577,29 @@ function Timeline({
                   <span>{formatTime(tick)}</span>
                 </div>
               ))}
+              {markerPins.map((pin) => {
+                const kindClass =
+                  pin.kind === 'K'
+                    ? styles.markerK
+                    : pin.kind === 'D'
+                      ? styles.markerD
+                      : styles.markerA;
+                return (
+                  <button
+                    key={pin.key}
+                    type="button"
+                    className={`${styles.marker} ${kindClass}`}
+                    style={{ left: `${pin.left}%` }}
+                    title={`${pin.kind} at ${formatTime(pin.time)}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSeek(pin.time);
+                    }}
+                  >
+                    {pin.kind}
+                  </button>
+                );
+              })}
             </div>
 
             {OVERLAY_LANES.map((lane) => (

@@ -7,9 +7,20 @@ import styles from './TranscriptPanel.module.css';
  * @param {Array} props.words - Array of word objects {start, end, word}
  * @param {number} props.currentTime - Current playback time in seconds
  * @param {Function} props.onSeek - Callback when user clicks on a word to seek
- * @param {boolean} props.loading - Loading state
+ * @param {boolean} props.loading - Whether a transcription job is running
+ * @param {number} props.progress - Transcription progress (0.0-1.0)
+ * @param {boolean} props.hasFile - Whether a video is loaded (enables the start button)
+ * @param {Function} props.onStartTranscription - Start the transcription job
  */
-export default function TranscriptPanel({ words = [], currentTime = 0, onSeek, loading = false }) {
+export default function TranscriptPanel({
+  words = [],
+  currentTime = 0,
+  onSeek,
+  loading = false,
+  progress = 0,
+  hasFile = false,
+  onStartTranscription,
+}) {
   const activeWordRef = useRef(null);
 
   // Auto-scroll to active word
@@ -38,6 +49,7 @@ export default function TranscriptPanel({ words = [], currentTime = 0, onSeek, l
   };
 
   if (loading) {
+    const percent = Math.round((progress || 0) * 100);
     return (
       <div className={styles.transcriptPanel}>
         <div className={styles.header}>
@@ -45,7 +57,16 @@ export default function TranscriptPanel({ words = [], currentTime = 0, onSeek, l
         </div>
         <div className={styles.loadingContainer}>
           <div className={styles.spinner}></div>
-          <p>Extracting transcript...</p>
+          <p>Transcribing… {percent}%</p>
+          <div className={styles.progressTrack}>
+            <div
+              className={styles.progressFill}
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+          <p className={styles.hint}>
+            Long videos can take several minutes. You can keep editing while this runs.
+          </p>
         </div>
       </div>
     );
@@ -58,8 +79,27 @@ export default function TranscriptPanel({ words = [], currentTime = 0, onSeek, l
           <h2>Transcript</h2>
         </div>
         <div className={styles.emptyState}>
-          <p>No transcript available</p>
-          <p className={styles.hint}>Upload a video to see the transcript</p>
+          {hasFile ? (
+            <>
+              <p>No transcript yet</p>
+              <p className={styles.hint}>
+                Transcription runs on demand — it can take a while on long videos.
+              </p>
+              <button
+                type="button"
+                className={styles.startButton}
+                onClick={onStartTranscription}
+                disabled={!onStartTranscription}
+              >
+                Start transcription
+              </button>
+            </>
+          ) : (
+            <>
+              <p>No transcript available</p>
+              <p className={styles.hint}>Upload a video to see the transcript</p>
+            </>
+          )}
         </div>
       </div>
     );
