@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Optional
 
-from groq import Groq
+from backend.features.llm import DEFAULT_MODEL, create_chat_client
 
 from backend.features.diagram.schema import (
     DIAGRAM_TYPES,
@@ -32,8 +31,6 @@ from backend.features.diagram.schema import (
 )
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 DETECTION_SYSTEM_PROMPT = f"""You are an expert video editor for podcast videos. Your task is to read a full transcript and find the sections where the speaker explains something that would genuinely be clearer with an animated diagram overlaid on the video.
 
@@ -83,22 +80,27 @@ Your response must be a JSON object of this exact form:
 
 
 class DiagramDetectorLLM:
-    """Two-stage LLM client for suggesting diagram overlays using Groq Cloud."""
+    """Two-stage LLM client for suggesting diagram overlays.
 
-    def __init__(self, api_key: Optional[str] = None, model: str = DEFAULT_MODEL):
+    Talks to Groq Cloud by default, or any OpenAI-compatible provider via a
+    custom base URL.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = DEFAULT_MODEL,
+        base_url: Optional[str] = None,
+    ):
         """Initializes the LLM client.
 
         Args:
-            api_key (str, optional): Groq API key. If not provided, reads from the API_KEY env var.
-            model (str, optional): Groq model to use. Defaults to "llama-3.3-70b-versatile".
+            api_key (str, optional): Provider API key. If not provided, reads from the API_KEY env var.
+            model (str, optional): Model to use. Defaults to "llama-3.3-70b-versatile".
+            base_url (str, optional): OpenAI-compatible base URL for a custom
+                provider (falls back to the API_BASE_URL env var; unset = Groq).
         """
-        self.api_key = api_key or os.getenv("API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "Groq API key must be provided either as argument or API_KEY environment variable"
-            )
-
-        self.client = Groq(api_key=self.api_key)
+        self.client = create_chat_client(api_key=api_key, base_url=base_url)
         self.model = model
 
     def suggest_diagrams(self, transcript: list, additional_context: str = "") -> list:
@@ -246,7 +248,7 @@ Design the diagram for this section and return it as a JSON object with "title" 
                 response_format={"type": "json_object"},
             )
         except Exception as e:
-            raise RuntimeError(f"Error calling Groq: {e}")
+            raise RuntimeError(f"Error calling the LLM provider: {e}")
 
         content = response.choices[0].message.content
         try:
@@ -300,17 +302,20 @@ def suggest_diagrams(
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     additional_context: str = "",
+    base_url: Optional[str] = None,
 ) -> list:
     """Suggests animated diagram overlays for a video based on its transcript.
 
     Args:
         transcript (list): A list of transcript segments with "start", "end", and "text" keys.
-        api_key (str, optional): Groq API key. If not provided, reads from the API_KEY env var.
-        model (str, optional): Groq model to use. Defaults to "llama-3.3-70b-versatile".
+        api_key (str, optional): Provider API key. If not provided, reads from the API_KEY env var.
+        model (str, optional): Model to use. Defaults to "llama-3.3-70b-versatile".
         additional_context (str, optional): Additional instructions or context for the LLM.
+        base_url (str, optional): OpenAI-compatible base URL for a custom LLM
+            provider (falls back to the API_BASE_URL env var; unset = Groq).
 
     Returns:
         list: Validated diagram suggestions sorted by start time.
     """
-    llm = DiagramDetectorLLM(api_key=api_key, model=model)
+    llm = DiagramDetectorLLM(api_key=api_key, model=model, base_url=base_url)
     return llm.suggest_diagrams(transcript, additional_context)

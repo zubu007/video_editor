@@ -10,11 +10,8 @@ agentic loop — the model may chain several calls before producing its reply.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
-
-from groq import Groq
 
 from backend.features.assistant.tools import (
     ToolContext,
@@ -22,8 +19,7 @@ from backend.features.assistant.tools import (
     execute_tool,
     get_tool_specs,
 )
-
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+from backend.features.llm import DEFAULT_MODEL, create_chat_client
 
 # Roles the frontend may send as conversation history.
 ALLOWED_ROLES = {"user", "assistant"}
@@ -83,20 +79,21 @@ class ChatResult:
 class ProjectChatLLM:
     """LLM agent for the in-editor project assistant chat."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = DEFAULT_MODEL,
+        base_url: Optional[str] = None,
+    ):
         """Initializes the chat client.
 
         Args:
-            api_key: Groq API key. If not provided, reads from the API_KEY env var.
-            model: Groq model to use.
+            api_key: Provider API key. If not provided, reads from the API_KEY env var.
+            model: Model to use.
+            base_url: OpenAI-compatible base URL for a custom provider (falls
+                back to the API_BASE_URL env var; unset = Groq).
         """
-        self.api_key = api_key or os.getenv("API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "Groq API key must be provided either as argument or API_KEY environment variable"
-            )
-
-        self.client = Groq(api_key=self.api_key)
+        self.client = create_chat_client(api_key=api_key, base_url=base_url)
         self.model = model
 
     def chat(
@@ -296,6 +293,7 @@ def generate_chat_reply(
     tool_context: Optional[ToolContext] = None,
     api_key: Optional[str] = None,
     model: str = DEFAULT_MODEL,
+    base_url: Optional[str] = None,
 ) -> ChatResult:
     """Convenience wrapper mirroring the other feature modules' entry points.
 
@@ -303,11 +301,13 @@ def generate_chat_reply(
         messages: Conversation history ({"role", "content"} dicts, oldest first).
         project_context: Prebuilt project state description.
         tool_context: Project/session context enabling agent tools (optional).
-        api_key: Groq API key (falls back to the API_KEY env var).
-        model: Groq model to use.
+        api_key: Provider API key (falls back to the API_KEY env var).
+        model: Model to use.
+        base_url: OpenAI-compatible base URL for a custom LLM provider (falls
+            back to the API_BASE_URL env var; unset = Groq).
 
     Returns:
         The agent's ChatResult (reply text, executed actions, edits_changed).
     """
-    client = ProjectChatLLM(api_key=api_key, model=model)
+    client = ProjectChatLLM(api_key=api_key, model=model, base_url=base_url)
     return client.chat(messages, project_context, tool_context=tool_context)

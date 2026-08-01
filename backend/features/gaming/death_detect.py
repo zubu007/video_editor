@@ -28,9 +28,7 @@ in the ``{"start", "end"}`` shape the rest of the pipeline speaks.
 from __future__ import annotations
 
 import logging
-import os
 import re
-import shutil
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -39,6 +37,12 @@ from pathlib import Path
 import cv2
 import imageio_ffmpeg
 import numpy as np
+
+from backend.features.gaming.ocr import (
+    DEFAULT_OCR_ENGINE,
+    engine_available,
+    read_digits,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -404,52 +408,19 @@ def _stream_top_strip(video_path: str | Path, fps: float, width: int, strip_h: i
         proc.wait()
 
 
-def _ocr_available() -> bool:
-    """Whether tesseract OCR can run, configuring pytesseract's binary path.
-
-    The tesseract binary is often installed somewhere that isn't on the server
-    process's ``PATH`` — most commonly Homebrew's ``/opt/homebrew/bin`` on macOS
-    when the server is launched from a GUI or a minimal shell. When that happens
-    ``pytesseract`` can't find the binary and OCR is silently disabled, which
-    drops the K/A markers. We resolve the binary via ``shutil.which`` and a few
-    well-known locations and point pytesseract at it so OCR isn't skipped purely
-    because of ``PATH``.
-    """
-    try:
-        import pytesseract
-    except Exception:  # noqa: BLE001 - missing package disables OCR
-        return False
-
-    cmd = shutil.which("tesseract")
-    if cmd is None:
-        for candidate in (
-            "/opt/homebrew/bin/tesseract",
-            "/usr/local/bin/tesseract",
-            "/usr/bin/tesseract",
-        ):
-            if os.path.exists(candidate):
-                cmd = candidate
-                break
-    if cmd is not None:
-        pytesseract.pytesseract.tesseract_cmd = cmd
-
-    try:
-        pytesseract.get_tesseract_version()
-        return True
-    except Exception:  # noqa: BLE001 - any binary failure disables OCR
-        return False
+def _ocr_available(engine: str = DEFAULT_OCR_ENGINE) -> bool:
+    """Whether the selected OCR engine can run (see :mod:`.ocr`)."""
+    return engine_available(engine)[0]
 
 
-def _ocr_deaths(kda_bgr: np.ndarray, previous: int) -> int:
+def _ocr_deaths(
+    kda_bgr: np.ndarray, previous: int, engine: str = DEFAULT_OCR_ENGINE
+) -> int:
     """Read the K/D/A deaths (middle) number; keep it monotonic non-decreasing."""
-    import pytesseract
-
     gray = cv2.cvtColor(kda_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
     _, bw = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-    text = pytesseract.image_to_string(
-        bw, config="--psm 7 -c tessedit_char_whitelist=0123456789/"
-    )
+    text = read_digits(engine, bw)
     nums = re.findall(r"\d+", text)
     if len(nums) < 3:
         return previous
@@ -459,7 +430,9 @@ def _ocr_deaths(kda_bgr: np.ndarray, previous: int) -> int:
 
 
 def _ocr_kda(
-    kda_bgr: np.ndarray, previous: tuple[int, int, int]
+    kda_bgr: np.ndarray,
+    previous: tuple[int, int, int],
+    engine: str = DEFAULT_OCR_ENGINE,
 ) -> tuple[int, int, int]:
     """Read the full kills/deaths/assists triple, kept monotonic non-decreasing.
 
@@ -471,18 +444,15 @@ def _ocr_kda(
     Args:
         kda_bgr: The K/D/A box crop (BGR).
         previous: The last accepted ``(kills, deaths, assists)`` triple.
+        engine: The OCR engine to read with (see :mod:`.ocr`).
 
     Returns:
         The updated ``(kills, deaths, assists)`` triple.
     """
-    import pytesseract
-
     gray = cv2.cvtColor(kda_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
     _, bw = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-    text = pytesseract.image_to_string(
-        bw, config="--psm 7 -c tessedit_char_whitelist=0123456789/"
-    )
+    text = read_digits(engine, bw)
     nums = re.findall(r"\d+", text)
     if len(nums) < 3:
         return previous
@@ -594,6 +564,7 @@ def detect_death_intervals(
     team: str = "radiant",
     player_slot: int | None = None,
     use_ocr: bool = False,
+    ocr_engine: str = DEFAULT_OCR_ENGINE,
     layout: DotaHudLayout | None = None,
 ) -> list[dict]:
     """Detect the player's dead intervals in a Dota 2 recording.
@@ -611,8 +582,9 @@ def detect_death_intervals(
         team: The player's team (``"radiant"`` or ``"dire"``).
         player_slot: 0-based top-bar slot of the player; auto-identified via
             :func:`identify_player_slot` when ``None``.
-        use_ocr: When ``True`` and tesseract is available, tag each interval with
-            ``"confirmed"`` if a K/D/A deaths increment lands near its start.
+        use_ocr: When ``True`` and the OCR engine is available, tag each interval
+            with ``"confirmed"`` if a K/D/A deaths increment lands near its start.
+        ocr_engine: Which OCR engine reads the counter (see :mod:`.ocr`).
         layout: HUD geometry; defaults to the calibrated layout for the video's
             resolution.
 
@@ -639,9 +611,11 @@ def detect_death_intervals(
         )
     slot_center = centers[player_slot]
 
-    ocr_on = use_ocr and _ocr_available()
+    ocr_on = use_ocr and _ocr_available(ocr_engine)
     if use_ocr and not ocr_on:
-        logger.warning("tesseract unavailable; skipping K/D/A confirmation")
+        logger.warning(
+            "OCR engine %r unavailable; skipping K/D/A confirmation", ocr_engine
+        )
 
     times: list[float] = []
     respawn: list[float] = []
@@ -651,7 +625,7 @@ def detect_death_intervals(
         times.append(t)
         respawn.append(_respawn_signal(strip, slot_center, layout))
         if ocr_on:
-            deaths = _ocr_deaths(_crop(strip, layout.kda_box), deaths)
+            deaths = _ocr_deaths(_crop(strip, layout.kda_box), deaths, ocr_engine)
             deaths_series.append(deaths)
 
     if not times:
@@ -679,17 +653,18 @@ def detect_gaming_markers(
     team: str = "radiant",
     player_slot: int | None = None,
     detect_kda: bool = True,
+    ocr_engine: str = DEFAULT_OCR_ENGINE,
     layout: DotaHudLayout | None = None,
 ) -> dict:
     """Single-pass detection of dead intervals plus K/D/A timeline markers.
 
     Runs one HUD scan and derives two things from it. When ``detect_kda`` is set
-    and tesseract is available, all three K/D/A markers come from the top-left
-    counter's increments — kills, deaths *and* assists — and each dead interval
-    starts at its deaths-counter increment (the exact moment of death) while its
-    end still comes from the reliable golden respawn-box run
-    (:func:`_death_intervals_from_runs`). Without OCR (``detect_kda`` off or
-    tesseract missing) the respawn box alone drives both the intervals and the
+    and the OCR engine is available, all three K/D/A markers come from the
+    top-left counter's increments — kills, deaths *and* assists — and each dead
+    interval starts at its deaths-counter increment (the exact moment of death)
+    while its end still comes from the reliable golden respawn-box run
+    (:func:`_death_intervals_from_runs`). Without OCR (``detect_kda`` off or the
+    engine missing) the respawn box alone drives both the intervals and the
     ``"D"`` markers, exactly as :func:`detect_death_intervals`.
 
     Args:
@@ -697,9 +672,10 @@ def detect_gaming_markers(
         fps: Sampling rate in frames per second.
         team: The player's team (``"radiant"`` or ``"dire"``).
         player_slot: 0-based top-bar slot; auto-identified when ``None``.
-        detect_kda: When ``True`` and tesseract is available, emit K/D/A markers
-            from the OCR'd counter and anchor each interval's start on its deaths
-            increment.
+        detect_kda: When ``True`` and the OCR engine is available, emit K/D/A
+            markers from the OCR'd counter and anchor each interval's start on
+            its deaths increment.
+        ocr_engine: Which OCR engine reads the counter (see :mod:`.ocr`).
         layout: HUD geometry; defaults to the calibrated layout for the video.
 
     Returns:
@@ -729,9 +705,9 @@ def detect_gaming_markers(
         )
     slot_center = centers[player_slot]
 
-    kda_on = detect_kda and _ocr_available()
+    kda_on = detect_kda and _ocr_available(ocr_engine)
     if detect_kda and not kda_on:
-        logger.warning("tesseract unavailable; skipping K/D/A markers")
+        logger.warning("OCR engine %r unavailable; skipping K/D/A markers", ocr_engine)
 
     times: list[float] = []
     respawn: list[float] = []
@@ -743,7 +719,7 @@ def detect_gaming_markers(
         times.append(t)
         respawn.append(_respawn_signal(strip, slot_center, layout))
         if kda_on:
-            kda = _ocr_kda(_crop(strip, layout.kda_box), kda)
+            kda = _ocr_kda(_crop(strip, layout.kda_box), kda, ocr_engine)
             kills_series.append(kda[0])
             deaths_series.append(kda[1])
             assists_series.append(kda[2])

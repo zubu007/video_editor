@@ -309,11 +309,11 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         with self.assertRaises(ValueError):
             DiagramDetectorLLM._extract_list({"sections": "nope"}, "sections")
 
-    @patch("backend.features.diagram.detector.Groq")
-    def test_two_stage_suggest_diagrams(self, mock_groq_class):
+    @patch("backend.features.diagram.detector.create_chat_client")
+    def test_two_stage_suggest_diagrams(self, mock_create_client):
         # Stage 1 finds two sections; stage 2 designs each in turn.
         detection = {"sections": [make_section(), make_section(start=30.0, end=45.0)]}
-        create = mock_groq_class.return_value.chat.completions.create
+        create = mock_create_client.return_value.chat.completions.create
         create.side_effect = [
             mock_json_response(detection),
             mock_json_response(make_design()),
@@ -332,10 +332,10 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         self.assertEqual(result[0]["graph"]["reveal_order"], ["a", "b", "c"])
         self.assertEqual(result[1]["title"], "Second diagram")
 
-    @patch("backend.features.diagram.detector.Groq")
-    def test_out_of_bounds_section_dropped(self, mock_groq_class):
+    @patch("backend.features.diagram.detector.create_chat_client")
+    def test_out_of_bounds_section_dropped(self, mock_create_client):
         detection = {"sections": [make_section(), make_section(start=100.0, end=110.0)]}
-        create = mock_groq_class.return_value.chat.completions.create
+        create = mock_create_client.return_value.chat.completions.create
         create.side_effect = [
             mock_json_response(detection),
             mock_json_response(make_design()),
@@ -351,10 +351,10 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["start"], 10.0)
 
-    @patch("backend.features.diagram.detector.Groq")
-    def test_failed_design_skips_section_only(self, mock_groq_class):
+    @patch("backend.features.diagram.detector.create_chat_client")
+    def test_failed_design_skips_section_only(self, mock_create_client):
         detection = {"sections": [make_section(), make_section(start=30.0, end=45.0)]}
-        create = mock_groq_class.return_value.chat.completions.create
+        create = mock_create_client.return_value.chat.completions.create
         create.side_effect = [
             mock_json_response(detection),
             Exception("groq exploded"),  # first design call fails
@@ -369,8 +369,8 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "Survivor")
 
-    @patch("backend.features.diagram.detector.Groq")
-    def test_design_reveal_at_converted_to_segment_offsets(self, mock_groq_class):
+    @patch("backend.features.diagram.detector.create_chat_client")
+    def test_design_reveal_at_converted_to_segment_offsets(self, mock_create_client):
         # The design stage answers on the transcript's clock; suggestions carry
         # offsets relative to the segment start.
         nodes = [
@@ -378,7 +378,7 @@ class TestDiagramDetectorLLM(unittest.TestCase):
             {"id": "b", "label": "Edit", "reveal_at": 18.5},
             {"id": "c", "label": "Publish"},
         ]
-        create = mock_groq_class.return_value.chat.completions.create
+        create = mock_create_client.return_value.chat.completions.create
         create.side_effect = [
             mock_json_response({"sections": [make_section(start=10.0, end=25.0)]}),
             mock_json_response(make_design(graph=make_graph(nodes=nodes))),
@@ -404,7 +404,9 @@ class TestDiagramDetectorLLM(unittest.TestCase):
         transcript = [{"start": 0.0, "end": 10.0, "text": "Test"}]
         result = suggest_diagrams(transcript, api_key="test_key", model="some-model")
 
-        mock_llm_class.assert_called_once_with(api_key="test_key", model="some-model")
+        mock_llm_class.assert_called_once_with(
+            api_key="test_key", model="some-model", base_url=None
+        )
         mock_instance.suggest_diagrams.assert_called_once_with(transcript, "")
         self.assertEqual(result, [])
 

@@ -145,7 +145,7 @@ class TestEditingPlanGenerator(unittest.TestCase):
 
         # Verify the LLM was called correctly
         mock_llm_class.assert_called_once_with(
-            api_key="test_key", model="llama-3.3-70b-versatile"
+            api_key="test_key", model="llama-3.3-70b-versatile", base_url=None
         )
         mock_llm_instance.generate_editing_plan.assert_called_once()
 

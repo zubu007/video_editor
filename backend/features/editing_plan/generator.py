@@ -14,16 +14,19 @@ def generate_editing_plan(
     model: str = DEFAULT_MODEL,
     additional_context: str = "",
     output_file: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> list:
     """
     Generates an editing plan for a video based on its transcript.
 
     Args:
         transcript (list): A list of transcript segments with "start", "end", and "text" keys.
-        api_key (str, optional): Groq API key. If not provided, reads from the API_KEY env var.
-        model (str, optional): Groq model to use. Defaults to "llama-3.3-70b-versatile".
+        api_key (str, optional): Provider API key. If not provided, reads from the API_KEY env var.
+        model (str, optional): Model to use. Defaults to "llama-3.3-70b-versatile".
         additional_context (str, optional): Additional instructions or context for the LLM.
         output_file (str, optional): Path to save the editing plan as JSON.
+        base_url (str, optional): OpenAI-compatible base URL for a custom LLM
+            provider (falls back to the API_BASE_URL env var; unset = Groq).
 
     Returns:
         list: A list of editing decisions with timestamps and features to apply.
@@ -47,7 +50,7 @@ def generate_editing_plan(
         ]
     """
     # Initialize the LLM client
-    llm = EditingPlanLLM(api_key=api_key, model=model)
+    llm = EditingPlanLLM(api_key=api_key, model=model, base_url=base_url)
 
     # Generate the editing plan
     editing_plan = llm.generate_editing_plan(transcript, additional_context)

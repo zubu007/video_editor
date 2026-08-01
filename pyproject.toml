@@ -23,6 +23,20 @@ dependencies = [
     "yt-dlp>=2024.8.6",
     "manim>=0.18.0",
     "pytesseract>=0.3.10",
+    "openai>=1.40.0",
+]
+
+# Alternative OCR engines for the gaming K/D/A pass (Settings → K/D/A
+# detection). Heavy installs, so they are opt-in extras:
+#   uv pip install -e '.[ocr-paddle]'   # PaddleOCR + PaddlePaddle runtime
+#   uv pip install -e '.[ocr-easy]'     # EasyOCR (uses the existing torch)
+[project.optional-dependencies]
+ocr-paddle = [
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.6.0",
+]
+ocr-easy = [
+    "easyocr>=1.7.0",
 ]
 
 [dependency-groups]

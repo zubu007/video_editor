@@ -1,40 +1,39 @@
 """
-LLM client for generating editing decisions using the Groq Cloud API.
+LLM client for generating editing decisions using the configured LLM provider.
 """
 
 import json
-import os
 from typing import Optional
-
-from groq import Groq
 
 from backend.features.editing_plan.feature_registry import (
     get_feature_descriptions_for_llm,
 )
-
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+from backend.features.llm import DEFAULT_MODEL, create_chat_client
 
 
 class EditingPlanLLM:
     """
-    LLM client for generating editing plans using Groq Cloud.
+    LLM client for generating editing plans (Groq Cloud by default, or any
+    OpenAI-compatible provider via a custom base URL).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = DEFAULT_MODEL,
+        base_url: Optional[str] = None,
+    ):
         """
         Initializes the LLM client.
 
         Args:
-            api_key (str, optional): Groq API key. If not provided, reads from the API_KEY env var.
-            model (str, optional): Groq model to use. Defaults to "llama-3.3-70b-versatile".
+            api_key (str, optional): Provider API key. If not provided, reads from the API_KEY env var.
+            model (str, optional): Model to use. Defaults to "llama-3.3-70b-versatile".
+            base_url (str, optional): OpenAI-compatible base URL for a custom
+                provider. If not provided, reads from the API_BASE_URL env var;
+                unset means Groq Cloud.
         """
-        self.api_key = api_key or os.getenv("API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "Groq API key must be provided either as argument or API_KEY environment variable"
-            )
-
-        self.client = Groq(api_key=self.api_key)
+        self.client = create_chat_client(api_key=api_key, base_url=base_url)
         self.model = model
 
     def generate_editing_plan(
