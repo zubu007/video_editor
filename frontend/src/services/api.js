@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+import { getStoredSettings } from '../hooks/useSettings';
+
 // Base URL for the API - can be overridden with environment variable
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -12,16 +14,58 @@ const apiClient = axios.create({
 });
 
 /**
+ * LLM-provider request fields from the persisted settings (Settings → AI
+ * provider). Empty fields are omitted so the backend falls back to its .env
+ * Groq configuration.
+ * @returns {{api_key?: string, api_base_url?: string, llm_model?: string}}
+ */
+function llmProviderParams() {
+  const { llmApiKey, llmBaseUrl, llmModel } = getStoredSettings();
+  const params = {};
+  if (llmApiKey) params.api_key = llmApiKey;
+  if (llmBaseUrl) params.api_base_url = llmBaseUrl;
+  if (llmModel) params.llm_model = llmModel;
+  return params;
+}
+
+/**
+ * Extract a human-readable message from an axios/API error.
+ *
+ * FastAPI's `detail` is usually a string but is an array of objects for
+ * validation errors — rendering that raw crashes React ("Objects are not
+ * valid as a React child"), so always coerce here before putting an API
+ * error into state.
+ * @param {*} error - The caught error
+ * @param {string} fallback - Message when no detail is available
+ * @returns {string}
+ */
+export function apiErrorMessage(error, fallback) {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((d) => d?.msg).filter(Boolean);
+    if (msgs.length) return msgs.join('; ');
+  }
+  return fallback;
+}
+
+/**
  * Upload video file to backend
  * @param {File} file - Video file to upload
  * @param {Function} onProgress - Progress callback (percentage)
+ * @param {string|null} projectId - Attach to an existing project
+ * @param {string|null} projectType - 'standard' | 'gaming' (persisted so the
+ *   project reopens with the right editor tabs)
  * @returns {Promise<{file_id: string, file_url: string, duration: number, size: number, filename: string, project_id: string, media_asset_id: string}>}
  */
-export async function uploadVideo(file, onProgress, projectId = null) {
+export async function uploadVideo(file, onProgress, projectId = null, projectType = null) {
   const formData = new FormData();
   formData.append('video', file);
   if (projectId) {
     formData.append('project_id', projectId);
+  }
+  if (projectType) {
+    formData.append('project_type', projectType);
   }
 
   const response = await apiClient.post('/api/video/upload', formData, {
@@ -143,6 +187,7 @@ export async function generateEditingPlan(fileId, modelSize = 'base', additional
   const response = await apiClient.post(`/api/editing-plan/generate/${fileId}`, {
     model_size: modelSize,
     additional_context: additionalContext,
+    ...llmProviderParams(),
   });
 
   return response.data;
@@ -159,6 +204,7 @@ export async function suggestDiagrams(fileId, modelSize = 'base', additionalCont
   const response = await apiClient.post(`/api/diagrams/suggest/${fileId}`, {
     model_size: modelSize,
     additional_context: additionalContext,
+    ...llmProviderParams(),
   });
 
   return response.data;
@@ -486,6 +532,7 @@ export async function sendProjectChat(projectId, messages, { transcript = '', ac
     messages,
     transcript,
     activity_log: activityLog,
+    ...llmProviderParams(),
   });
   return response.data;
 }
@@ -514,19 +561,37 @@ export async function getSlotPreview(fileId, team = 'radiant') {
 }
 
 /**
+ * List the OCR engines selectable for the K/D/A pass (Settings → K/D/A
+ * detection), with per-engine availability on the server.
+ * @returns {Promise<{engines: Array<{name: string, label: string, description: string,
+ *   available: boolean, detail: string}>, default: string}>}
+ */
+export async function getOcrEngines() {
+  const response = await apiClient.get('/api/gaming/ocr-engines');
+  return response.data;
+}
+
+/**
  * Start a background Dota 2 death-detection job.
  *
  * A single HUD scan detects dead intervals and (when `detectKda` is set and
- * tesseract is available) the K/D/A event markers for the play bar.
+ * the selected OCR engine is available) the K/D/A event markers for the play
+ * bar. The engine comes from the persisted settings unless `ocrEngine`
+ * overrides it.
  * @param {string} fileId - Uploaded video file_id
- * @param {{team?: string, playerSlot?: number|null, detectKda?: boolean}} [options]
+ * @param {{team?: string, playerSlot?: number|null, detectKda?: boolean,
+ *   ocrEngine?: string|null}} [options]
  * @returns {Promise<{job_id: string, status: string}>}
  */
 export async function startDeathDetection(
   fileId,
-  { team = 'radiant', playerSlot = null, detectKda = false } = {}
+  { team = 'radiant', playerSlot = null, detectKda = false, ocrEngine = null } = {}
 ) {
   const params = { team, detect_kda: detectKda };
+  const engine = ocrEngine || getStoredSettings().ocrEngine;
+  if (engine) {
+    params.ocr_engine = engine;
+  }
   if (playerSlot !== null && playerSlot !== undefined) {
     params.player_slot = playerSlot;
   }
@@ -579,6 +644,39 @@ export async function getHighlightClipStatus(jobId) {
   const response = await apiClient.get(
     `/api/gaming/highlight-clip/status/${jobId}`
   );
+  return response.data;
+}
+
+/**
+ * List saved projects for the resume screen, newest first.
+ * @returns {Promise<{projects: Array<{id: string, name: string, project_type: string, created_at: string, updated_at: string, file_id: string|null, media_asset_id: string|null, filename: string|null, duration: number|null, size: number|null, source_available: boolean, edit_count: number}>, count: number}>}
+ */
+export async function listProjects() {
+  const response = await apiClient.get('/api/projects');
+  return response.data;
+}
+
+/**
+ * Fetch everything needed to resume a saved project. The payload mirrors the
+ * upload response so the same load path applies.
+ * @param {string} projectId - Project to resume
+ * @returns {Promise<{file_id: string, file_url: string, filename: string, size: number, duration: number|null, project_id: string, media_asset_id: string, name: string, project_type: string}>}
+ */
+export async function openProject(projectId) {
+  const response = await apiClient.get(`/api/projects/${projectId}/open`);
+  return response.data;
+}
+
+/**
+ * Delete a saved project and (by default) its uploaded source videos.
+ * @param {string} projectId - Project to delete
+ * @param {boolean} [deleteFiles] - Also unlink the uploads from disk
+ * @returns {Promise<{project_id: string, deleted_edits: number, deleted_assets: number, deleted_files: string[]}>}
+ */
+export async function deleteProject(projectId, deleteFiles = true) {
+  const response = await apiClient.delete(`/api/projects/${projectId}`, {
+    params: { delete_files: deleteFiles },
+  });
   return response.data;
 }
 

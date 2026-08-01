@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from backend.features.gaming.death_detect import detect_gaming_markers
+from backend.features.gaming.ocr import DEFAULT_OCR_ENGINE
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,12 @@ class DeathDetectJob:
     events: list[dict] = field(default_factory=list)
     player_slot: Optional[int] = None
     confidence: Optional[float] = None
-    # Whether the K/A OCR pass actually ran (tesseract available). When False,
-    # only death ("D") markers are produced even if K/D/A was requested.
+    # Whether the K/A OCR pass actually ran (the selected engine was available).
+    # When False, only death ("D") markers are produced even if K/D/A was
+    # requested.
     kda_available: bool = False
+    # The OCR engine the K/D/A pass read with (see gaming.ocr).
+    ocr_engine: str = DEFAULT_OCR_ENGINE
     error: Optional[str] = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
@@ -82,6 +86,7 @@ def run_death_detect_job(
     team: str = "radiant",
     player_slot: Optional[int] = None,
     detect_kda: bool = True,
+    ocr_engine: str = DEFAULT_OCR_ENGINE,
 ) -> None:
     """Detect death intervals and K/D/A markers, recording them on the job.
 
@@ -89,15 +94,17 @@ def run_death_detect_job(
     the kills/deaths/assists event markers for the play bar. When ``player_slot``
     is ``None`` the slot is auto-identified first (so the resolved slot and its
     confidence can drive the UI's slot selector); otherwise the caller's manual
-    override is used verbatim. ``detect_kda`` toggles the K/A OCR pass.
+    override is used verbatim. ``detect_kda`` toggles the K/A OCR pass and
+    ``ocr_engine`` selects which OCR reads the counter (see gaming.ocr).
     """
-    update_job(job_id, status="running")
+    update_job(job_id, status="running", ocr_engine=ocr_engine)
     try:
         result = detect_gaming_markers(
             video_path,
             team=team,
             player_slot=player_slot,
             detect_kda=detect_kda,
+            ocr_engine=ocr_engine,
         )
         update_job(
             job_id,

@@ -492,3 +492,120 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Start screen: resume a saved project without re-uploading its video. */
+.saved-projects {
+  margin-top: 36px;
+  text-align: left;
+}
+
+.saved-projects h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  color: var(--text);
+}
+
+.saved-projects > p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.saved-projects-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.saved-project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.saved-project-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
+.saved-project-info strong {
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-project-info span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-project-badge {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.saved-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.saved-project-open {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.saved-project-open:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.saved-project-open:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.saved-project-delete {
+  color: #dc2626;
+  border-color: transparent;
+}
+
+.saved-projects-error {
+  margin: 20px 0 0;
+  font-size: 13px;
+  color: #dc2626;
+}
+
+.status-error {
+  color: #dc2626;
+  max-width: 420px;
+}

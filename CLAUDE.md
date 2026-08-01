@@ -45,8 +45,11 @@ The interactive API docs live at `http://localhost:8000/docs` once the server is
 Requires a `.env` file at the repo root:
 
 ```
-API_KEY=...           # Groq Cloud API key — editing-plan generation
+API_KEY=...           # LLM API key (Groq Cloud in the stock setup) — plan/diagrams/assistant
 PEXELS_API_KEY=...    # stock footage download
+
+# Optional — point all LLM features at any OpenAI-compatible provider instead of Groq:
+API_BASE_URL=...      # e.g. https://api.groq.com/openai/v1 or http://localhost:11434/v1
 
 # Optional — only needed for the caption-removal feature (see below):
 SUBTITLE_REMOVER_DIR=third_party/VideoSubtitleRemover
@@ -54,6 +57,16 @@ SUBTITLE_REMOVER_PYTHON=third_party/VideoSubtitleRemover/.venv/bin/python
 ```
 
 The frontend reads `VITE_API_BASE_URL` (defaults to `http://localhost:8000`).
+
+All LLM clients (`editing_plan`, `diagram`, `assistant`) build their client via
+`backend/features/llm/provider.py` — `create_chat_client(api_key, base_url)` resolves
+per-request values → env (`API_KEY` / `API_BASE_URL`) → Groq default, returning the `openai`
+SDK for a custom base URL and the `groq` SDK otherwise (same `chat.completions.create`
+surface). The frontend's Settings → "AI provider" (base URL / key / model, localStorage)
+is sent with every LLM request as `api_key` / `api_base_url` / `llm_model`.
+
+Alternative K/D/A OCR engines are opt-in extras (heavy installs):
+`uv pip install -e '.[ocr-paddle]'` (PaddleOCR) or `-e '.[ocr-easy]'` (EasyOCR).
 
 ### Caption removal (external tool) setup
 
@@ -159,6 +172,13 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   (Dire mirrors Radiant about the frame centre); slot auto-ID samples the mid-game stretch
   (25–85% of duration) because pick-phase/pre-game top-bar layouts poison the colour vote. See
   [TODO.md](TODO.md) item 3 for findings and remaining open work (Dire-side footage validation).
+- `gaming/ocr.py` — pluggable OCR for the K/D/A counter: `tesseract` (default), `paddleocr`,
+  `easyocr` (the latter two are the `ocr-paddle` / `ocr-easy` extras; readers are lazy
+  process-wide singletons, availability checks import-only, and a failed read returns `""`
+  rather than killing the scan). `GET /api/gaming/ocr-engines` lists engines + availability for
+  the Settings picker; `?ocr_engine=` on `POST /api/gaming/detect-deaths/{file_id}` selects one
+  (validated, 400 on unknown) and the frontend sends the persisted `ocrEngine` setting
+  automatically (`services/api.js` reads localStorage via `getStoredSettings`).
 - `gaming/reel_crop.py` — reframes a highlight clip as a **square reel** for the "Highlights" tab.
   A centred crop takes the frame to 1:1 (equal bands off each side), which keeps the top hero bar
   and the bottom hero/ability/item panel but discards the minimap and K/D/A readout; both are
@@ -199,6 +219,22 @@ from the edit's `details["words"]` (else the source is re-transcribed), get filt
 span, remapped from source to output time (`captions/remap.py` mirrors the cut/timeline
 semantics), and burned onto the final file. Caption `details` also carry `style` (validated
 against `STYLE_PRESETS`, listed at `GET /api/captions/styles`) and `max_words_per_line`.
+
+**Project save/load (resume without re-uploading):** everything a project needs is already in
+SQLite + `temp/uploads`, so "saving" is implicit; the resume flow exposes it. `Project` carries
+`project_type` (`standard` | `gaming` — added by a lightweight `ALTER TABLE` migration in
+`init_db()`/`_migrate_columns()`; upload accepts it as a form field and the frontend sends it, so
+a reopened gaming project restores its Deaths/Highlights tabs). `GET /api/projects` lists saved
+projects newest-first with their latest media asset, `source_available` (does the upload still
+exist on disk) and non-timeline `edit_count`; `GET /api/projects/{id}/open` returns an
+upload-response-shaped payload (plus `name`/`project_type`) so the frontend resumes through the
+exact same `loadProjectMedia` path as a fresh upload — saved edits and timeline restore from
+there; 410 when the source file is gone. `DELETE /api/projects/{id}` removes the project's rows
+and (by default, `?delete_files=false` to keep) unlinks its uploads — uploads are multi-GB, so
+this is how disk space comes back. The start screen's "Resume a project" list drives all three.
+Uploads are also guarded by a middleware disk-space check (`MIN_FREE_DISK_BYTES`): a video
+transiently costs ~2x its size (multipart spool + stored copy), and running out of disk mid-write
+used to surface as opaque ffmpeg/SQLite failures — now a clear 507 up front.
 
 ### Rendering (async job + progress)
 

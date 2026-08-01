@@ -18,6 +18,7 @@ import ChatPanel from './components/Assistant/ChatPanel';
 import InspectorPanel from './components/Inspector/InspectorPanel';
 import SettingsModal from './components/Settings/SettingsModal';
 import useSettings from './hooks/useSettings';
+import { formatTime } from './utils/timeFormat';
 import {
   uploadVideo,
   importYouTubeVideo,
@@ -47,6 +48,10 @@ import {
   getDeathDetectionStatus,
   startHighlightClip,
   getHighlightClipStatus,
+  listProjects,
+  openProject,
+  deleteProject,
+  apiErrorMessage,
 } from './services/api';
 import './App.css';
 
@@ -152,6 +157,9 @@ function App() {
   const [deathSlots, setDeathSlots] = useState([]);
   const [deathSelectedSlot, setDeathSelectedSlot] = useState(null);
   const [deathCutsSaved, setDeathCutsSaved] = useState(0);
+  // Seconds of the death left visible before each cut starts, so the kill
+  // itself stays in the video instead of being sliced at the exact frame.
+  const [deathCutPadding, setDeathCutPadding] = useState('1.5');
   // K/D/A event markers for the play bar (gaming mode), placed by the dedicated
   // "Detect K/D/A markers" button.
   const [gamingEvents, setGamingEvents] = useState([]);
@@ -165,6 +173,13 @@ function App() {
   const [highlightStatus, setHighlightStatus] = useState('idle'); // idle|creating|done|error
   const [highlightError, setHighlightError] = useState(null);
   const [highlightResult, setHighlightResult] = useState(null);
+  // Saved projects offered on the start screen ("Resume a project").
+  const [savedProjects, setSavedProjects] = useState([]);
+  const [savedProjectsError, setSavedProjectsError] = useState(null);
+  const [resumingProjectId, setResumingProjectId] = useState(null);
+  // Upload failures surfaced in the status strip (the upload used to fail
+  // silently, leaving a video that plays but no tools that work).
+  const [uploadError, setUploadError] = useState(null);
   const videoPlayerRef = useRef(null);
   const deathPollRef = useRef(null);
   const markerPollRef = useRef(null);
@@ -469,20 +484,33 @@ function App() {
     resetProjectStateForLoad();
     setIsUploading(true);
     setUploadProgress(0);
+    setUploadError(null);
 
     try {
       // Upload video to backend
       console.log('Uploading video to backend...');
-      const response = await uploadVideo(file, (progress) => {
-        setUploadProgress(progress);
-      });
+      const response = await uploadVideo(
+        file,
+        (progress) => {
+          setUploadProgress(progress);
+        },
+        null,
+        isGaming ? 'gaming' : 'standard'
+      );
 
       console.log('Video uploaded:', response);
       URL.revokeObjectURL(blobUrl);
       await loadProjectMedia(response);
     } catch (error) {
       console.error('Error uploading video or fetching data:', error);
-      // Still allow playback with blob URL even if upload/waveform/transcript fails
+      // Still allow playback with blob URL even if upload/waveform/transcript
+      // fails — but say what went wrong, or every tool just sits disabled.
+      setUploadError(
+        apiErrorMessage(
+          error,
+          'Uploading to the server failed — playback works, but editing tools need the upload.'
+        )
+      );
     } finally {
       setIsUploading(false);
       setIsLoadingWaveform(false);
@@ -511,6 +539,73 @@ function App() {
     } finally {
       setIsLoadingWaveform(false);
       setIsLoadingTranscript(false);
+    }
+  };
+
+  // Keep the "Resume a project" list fresh while the start screen is showing.
+  useEffect(() => {
+    if (videoSrc || sourceMode !== 'choose') return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await listProjects();
+        if (!cancelled) {
+          setSavedProjects(data.projects);
+          setSavedProjectsError(null);
+        }
+      } catch (error) {
+        console.error('Error listing saved projects:', error);
+        if (!cancelled) {
+          setSavedProjectsError('Could not load saved projects.');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoSrc, sourceMode]);
+
+  // Reopen a saved project: the backend hands back the same shape as an upload
+  // response, so the whole load path (waveform, saved edits, timeline) is
+  // shared with a fresh upload — no re-uploading the source video.
+  const handleResumeProject = async (project) => {
+    setResumingProjectId(project.id);
+    setSavedProjectsError(null);
+    try {
+      const response = await openProject(project.id);
+      resetProjectStateForLoad();
+      setUploadError(null);
+      setSelectedFile({ name: response.filename });
+      setIsGaming(response.project_type === 'gaming');
+      await loadProjectMedia(response);
+      logActivity(`Resumed project "${response.name}".`);
+    } catch (error) {
+      console.error('Error resuming project:', error);
+      setSavedProjectsError(
+        apiErrorMessage(error, 'Could not open the project.')
+      );
+    } finally {
+      setResumingProjectId(null);
+    }
+  };
+
+  const handleDeleteSavedProject = async (project) => {
+    const confirmed = window.confirm(
+      `Delete "${project.name}"${
+        project.source_available ? ' and its uploaded video' : ''
+      }? This cannot be undone.`
+    );
+    if (!confirmed) return;
+    try {
+      await deleteProject(project.id);
+      setSavedProjects((projects) =>
+        projects.filter((p) => p.id !== project.id)
+      );
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      setSavedProjectsError(
+        apiErrorMessage(error, 'Could not delete the project.')
+      );
     }
   };
 
@@ -1628,14 +1723,15 @@ function App() {
             if (status.player_slot != null) setDeathPlayerSlot(status.player_slot);
             if (status.confidence != null) setDeathConfidence(status.confidence);
             setMarkerStatus('done');
-            // Kills/assists need the tesseract OCR pass; deaths don't. If OCR
-            // was unavailable on the server, only "D" markers come back — say so
-            // instead of silently showing deaths only.
+            // Kills/assists need the OCR pass; deaths don't. If the selected
+            // engine was unavailable on the server, only "D" markers come
+            // back — say so instead of silently showing deaths only.
             if (status.kda_available === false) {
+              const engine = status.ocr_engine || 'tesseract';
               setMarkerError(
-                'Only death markers were detected — kills/assists need tesseract ' +
-                  'OCR, which is unavailable on the server. Install tesseract to ' +
-                  'enable K/A markers.'
+                `Only death markers were detected — kills/assists need the ` +
+                  `"${engine}" OCR engine, which is unavailable on the server. ` +
+                  'Install it, or pick another engine in Settings.'
               );
             } else {
               setMarkerError(null);
@@ -1731,22 +1827,35 @@ function App() {
     }
   };
 
-  // Persist the detected dead intervals as cut edits on the project.
+  // Persist the detected dead intervals as cut edits on the project. Each cut
+  // starts `deathCutPadding` seconds after the detected death so the death
+  // moment itself stays in the video (clamped so short intervals can't invert).
   const handleAddDeathCuts = async () => {
     if (!projectId || deathIntervals.length === 0) return;
 
+    const parsedPadding = parseFloat(deathCutPadding);
+    const padding = Number.isNaN(parsedPadding) ? 0 : Math.max(0, parsedPadding);
     try {
       await createProjectEdits(
         projectId,
-        deathIntervals.map((iv) => ({
-          type: 'cut',
-          source: 'death_detection',
-          start: iv.start,
-          end: iv.end,
-          enabled: true,
-          media_asset_id: mediaAssetId,
-          metadata: { duration: iv.duration, kind: 'death' },
-        }))
+        deathIntervals.map((iv) => {
+          const start = Number(
+            Math.min(iv.start + padding, iv.end).toFixed(2)
+          );
+          return {
+            type: 'cut',
+            source: 'death_detection',
+            start,
+            end: iv.end,
+            enabled: true,
+            media_asset_id: mediaAssetId,
+            metadata: {
+              duration: Number((iv.end - start).toFixed(2)),
+              kind: 'death',
+              start_padding: padding,
+            },
+          };
+        })
       );
       const edits = await getProjectEdits(projectId);
       applyLoadedEdits(edits.edits);
@@ -1819,14 +1928,21 @@ function App() {
         } catch (error) {
           stopHighlightPolling();
           console.error('Error polling highlight status:', error);
-          setHighlightError('Lost contact with the highlight job.');
+          // A 404 mid-poll means the server restarted and its in-memory job
+          // registry was wiped (the clip may still finish on disk, but the
+          // job can no longer be tracked).
+          setHighlightError(
+            error?.response?.status === 404
+              ? 'The server restarted while the clip was rendering and lost track of the job. Create the highlight again.'
+              : 'Lost contact with the highlight job.'
+          );
           setHighlightStatus('error');
         }
       }, DEATH_POLL_INTERVAL_MS);
     } catch (error) {
       console.error('Error starting highlight clip:', error);
       setHighlightError(
-        error?.response?.data?.detail || 'Could not create the highlight clip.'
+        apiErrorMessage(error, 'Could not create the highlight clip.')
       );
       setHighlightStatus('error');
     }
@@ -1905,6 +2021,7 @@ function App() {
     setHighlightError(null);
     setHighlightResult(null);
     setIsGaming(false);
+    setUploadError(null);
     setActivePanel('tools');
     setCurrentView('editor');
     setSourceMode('choose');
@@ -1976,6 +2093,74 @@ function App() {
                   <span>Upload a Dota 2 recording and auto-cut death time</span>
                 </button>
               </div>
+
+              {savedProjectsError && (
+                <p className="saved-projects-error">{savedProjectsError}</p>
+              )}
+              {savedProjects.length > 0 && (
+                <div className="saved-projects">
+                  <h3>Resume a project</h3>
+                  <p>
+                    Pick up where you left off — saved edits and timeline load
+                    without re-uploading the video.
+                  </p>
+                  <ul className="saved-projects-list">
+                    {savedProjects.map((project) => (
+                      <li key={project.id} className="saved-project-row">
+                        <div className="saved-project-info">
+                          <strong>
+                            {project.name}
+                            {project.project_type === 'gaming' && (
+                              <span className="saved-project-badge">Gaming</span>
+                            )}
+                          </strong>
+                          <span>
+                            {project.filename || 'No video uploaded'}
+                            {project.duration != null &&
+                              ` · ${formatTime(project.duration)}`}
+                            {` · ${project.edit_count} edit${
+                              project.edit_count === 1 ? '' : 's'
+                            }`}
+                            {` · ${new Date(
+                              project.updated_at
+                            ).toLocaleDateString()}`}
+                            {!project.source_available &&
+                              ' · source video missing'}
+                          </span>
+                        </div>
+                        <div className="saved-project-actions">
+                          <button
+                            type="button"
+                            className="saved-project-open"
+                            disabled={
+                              !project.source_available ||
+                              resumingProjectId !== null
+                            }
+                            title={
+                              project.source_available
+                                ? 'Open this project'
+                                : 'The uploaded video is no longer on disk'
+                            }
+                            onClick={() => handleResumeProject(project)}
+                          >
+                            {resumingProjectId === project.id
+                              ? 'Opening…'
+                              : 'Open'}
+                          </button>
+                          <button
+                            type="button"
+                            className="text-button saved-project-delete"
+                            disabled={resumingProjectId !== null}
+                            onClick={() => handleDeleteSavedProject(project)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           ) : (
             <div className="source-panel">
@@ -2075,6 +2260,9 @@ function App() {
                 <strong>{selectedFile?.name}</strong>
               </div>
               {isUploading && <span>Uploading {uploadProgress}%</span>}
+              {uploadError && (
+                <span className="status-error">{uploadError}</span>
+              )}
               {isLoadingWaveform && <span>Generating waveform...</span>}
               {isLoadingTranscript && (
                 <span>
@@ -2204,6 +2392,8 @@ function App() {
                   onDetect={handleDetectDeaths}
                   onSeek={handleSeek}
                   onAddCuts={handleAddDeathCuts}
+                  cutPadding={deathCutPadding}
+                  onChangeCutPadding={setDeathCutPadding}
                   savedCount={deathCutsSaved}
                 />
               )}

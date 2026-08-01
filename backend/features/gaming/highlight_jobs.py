@@ -161,6 +161,25 @@ def text_captions_for_clip(
     return captions
 
 
+def _ffmpeg_error_message(stderr: Optional[str]) -> str:
+    """Turn ffmpeg's stderr into a short, user-facing job error.
+
+    The generic "failed" message hid the actual cause (most damagingly a full
+    disk, which reads as the app being broken); surface the recognisable cases
+    and otherwise the last stderr line, which is where ffmpeg puts the reason.
+    """
+    text = stderr or ""
+    if "No space left on device" in text:
+        return (
+            "The disk is full — the clip could not be written. Free up space "
+            "(old uploads in temp/uploads are the usual culprit) and retry."
+        )
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if lines:
+        return f"Failed to create highlight clip: {lines[-1][:300]}"
+    return "Failed to create highlight clip"
+
+
 def _caption_words(
     video_path: str,
     captions_edits: list[dict],
@@ -312,7 +331,7 @@ def run_highlight_job(
         )
     except subprocess.CalledProcessError as e:
         logger.error("Highlight job %s ffmpeg failed: %s", job_id, e.stderr)
-        update_job(job_id, status="error", error="Failed to create highlight clip")
+        update_job(job_id, status="error", error=_ffmpeg_error_message(e.stderr))
     except Exception as e:  # noqa: BLE001 - record any failure for the poller
         logger.error("Highlight job %s failed: %s", job_id, e)
         update_job(job_id, status="error", error=str(e))
