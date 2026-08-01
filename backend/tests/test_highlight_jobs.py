@@ -204,8 +204,32 @@ class TestHighlightJobs(unittest.TestCase):
 
         failed = get_job(job.job_id)
         self.assertEqual(failed.status, "error")
-        self.assertEqual(failed.error, "Failed to create highlight clip")
+        self.assertEqual(failed.error, "Failed to create highlight clip: boom")
         self.assertIsNone(failed.filename)
+
+    def test_run_highlight_job_reports_full_disk_plainly(self):
+        job = create_job("file-enospc")
+
+        with patch(
+            "backend.features.gaming.highlight_jobs.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                1,
+                "ffmpeg",
+                stderr="av_interleaved_write_frame(): No space left on device",
+            ),
+        ):
+            run_highlight_job(
+                job.job_id,
+                "/tmp/source.mp4",
+                0.0,
+                5.0,
+                "/tmp/out/clip.mp4",
+                "clip.mp4",
+            )
+
+        failed = get_job(job.job_id)
+        self.assertEqual(failed.status, "error")
+        self.assertIn("disk is full", failed.error)
 
 
 class TestCaptionClipRemap(unittest.TestCase):

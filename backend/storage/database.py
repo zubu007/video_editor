@@ -27,6 +27,9 @@ class Project(SQLModel, table=True):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     name: str
+    # "standard" or "gaming" — decides which editor tabs the frontend shows
+    # when the project is reopened (gaming adds Deaths/Highlights).
+    project_type: str = Field(default="standard")
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -98,9 +101,28 @@ class StockFootage(SQLModel, table=True):
 
 
 def init_db() -> None:
-    """Create database tables."""
+    """Create database tables and apply lightweight migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SQLModel.metadata.create_all(engine)
+    _migrate_columns()
+
+
+def _migrate_columns() -> None:
+    """Add columns that ``create_all`` cannot add to pre-existing tables."""
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        columns = {
+            row[1] for row in connection.execute(text("PRAGMA table_info(project)"))
+        }
+        if "project_type" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE project ADD COLUMN project_type TEXT "
+                    "NOT NULL DEFAULT 'standard'"
+                )
+            )
+            connection.commit()
 
 
 def get_session() -> Session:
@@ -126,9 +148,7 @@ def touch_project(session: Session, project: Project) -> None:
     session.add(project)
 
 
-def get_latest_editing_plan(
-    session: Session, project_id: str
-) -> EditingPlan | None:
+def get_latest_editing_plan(session: Session, project_id: str) -> EditingPlan | None:
     """Return the most recently updated editing plan for a project, if any."""
     statement = (
         select(EditingPlan)

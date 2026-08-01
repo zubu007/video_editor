@@ -23,10 +23,11 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from moviepy import VideoFileClip
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -49,6 +50,11 @@ from backend.features.gaming.jobs import (
     create_job as create_death_detect_job,
     get_job as get_death_detect_job,
     run_death_detect_job,
+)
+from backend.features.gaming.ocr import (
+    DEFAULT_OCR_ENGINE,
+    OCR_ENGINES,
+    list_engines as list_ocr_engines,
 )
 from backend.features.transcript.jobs import (
     create_job as create_transcript_job,
@@ -172,6 +178,40 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def reject_uploads_when_disk_is_low(request: Request, call_next):
+    """Refuse video uploads that would exhaust the disk, before they spool.
+
+    Starlette spools a multipart upload to a temp file while parsing, and the
+    endpoint then writes a second full copy under ``temp/uploads`` — so a video
+    transiently costs ~2x its size. Running out of disk mid-write used to fail
+    deep inside ffmpeg/SQLite with opaque errors (or kill the session outright);
+    checking the declared Content-Length up front turns that into an immediate,
+    actionable message.
+    """
+    if request.method == "POST" and request.url.path == "/api/video/upload":
+        try:
+            content_length = int(request.headers.get("content-length", 0))
+        except ValueError:
+            content_length = 0
+        free = shutil.disk_usage(UPLOAD_DIR).free
+        if content_length and free < content_length * 2 + MIN_FREE_DISK_BYTES:
+            needed_gb = (content_length * 2 + MIN_FREE_DISK_BYTES) / 1024**3
+            free_gb = free / 1024**3
+            return JSONResponse(
+                status_code=507,
+                content={
+                    "detail": (
+                        f"Not enough disk space to upload this video safely: "
+                        f"{free_gb:.1f} GB free, ~{needed_gb:.1f} GB needed. "
+                        "Delete old projects (their uploads live in "
+                        "temp/uploads) and try again."
+                    )
+                },
+            )
+    return await call_next(request)
+
+
 # Create temp directories for uploads and outputs
 UPLOAD_DIR = Path("temp/uploads")
 OUTPUT_DIR = Path("temp/outputs")
@@ -200,6 +240,12 @@ SUPPORTED_EDIT_TYPES = {
 # details["position"]. They are managed only through the /timeline endpoints,
 # not the generic edit endpoints.
 TIMELINE_EDIT_TYPE = "timeline_segment"
+# Project kinds; "gaming" surfaces the Deaths/Highlights tabs when reopened.
+PROJECT_TYPES = {"standard", "gaming"}
+# Refuse uploads that would leave less than this much free disk. A full disk
+# mid-write corrupts nothing here (temp files), but it kills ffmpeg/SQLite in
+# confusing ways downstream — fail early with a clear message instead.
+MIN_FREE_DISK_BYTES = 2 * 1024**3
 DEFAULT_ZOOM_LEVEL = 1.2
 CONTENT_TYPE_BY_EXTENSION = {
     ".mp4": "video/mp4",
@@ -403,8 +449,64 @@ class ProjectResponse(BaseModel):
 
     id: str
     name: str
+    project_type: str
     created_at: datetime
     updated_at: datetime
+
+
+class ProjectListItemResponse(BaseModel):
+    """One saved project in the resume-project list."""
+
+    id: str
+    name: str
+    project_type: str
+    created_at: datetime
+    updated_at: datetime
+    file_id: Optional[str] = Field(
+        None, description="The project's source video, if one was uploaded"
+    )
+    media_asset_id: Optional[str] = None
+    filename: Optional[str] = None
+    duration: Optional[float] = None
+    size: Optional[int] = None
+    source_available: bool = Field(
+        False, description="Whether the source video still exists on disk"
+    )
+    edit_count: int = 0
+
+
+class ProjectListResponse(BaseModel):
+    """Response model for the saved-projects list."""
+
+    projects: list[ProjectListItemResponse]
+    count: int
+
+
+class ProjectOpenResponse(BaseModel):
+    """Everything the frontend needs to resume a saved project.
+
+    Mirrors :class:`VideoUploadResponse` (so the same load path applies) plus
+    the project name and type.
+    """
+
+    file_id: str
+    file_url: str
+    filename: str
+    size: int
+    duration: Optional[float] = None
+    project_id: str
+    media_asset_id: str
+    name: str
+    project_type: str
+
+
+class ProjectDeleteResponse(BaseModel):
+    """Result of deleting a saved project."""
+
+    project_id: str
+    deleted_edits: int
+    deleted_assets: int
+    deleted_files: list[str]
 
 
 class MediaAssetResponse(BaseModel):
@@ -716,13 +818,35 @@ class DeathDetectStatusResponse(BaseModel):
     kda_available: bool = Field(
         False,
         description=(
-            "Whether the K/A OCR pass ran (tesseract available). When false, only "
-            "death markers are produced even if K/D/A was requested."
+            "Whether the K/A OCR pass ran (the selected engine was available). "
+            "When false, only death markers are produced even if K/D/A was "
+            "requested."
         ),
+    )
+    ocr_engine: str = Field(
+        DEFAULT_OCR_ENGINE,
+        description="OCR engine the K/D/A pass read with",
     )
     error: Optional[str] = Field(
         None, description="Failure detail when status is 'error'"
     )
+
+
+class OcrEngineInfo(BaseModel):
+    """One selectable OCR engine for the K/D/A pass."""
+
+    name: str = Field(..., description="Engine identifier (settings value)")
+    label: str = Field(..., description="Human-readable engine name")
+    description: str = Field(..., description="What it is and how to install it")
+    available: bool = Field(..., description="Whether the engine can run here")
+    detail: str = Field(..., description="Availability detail (e.g. what's missing)")
+
+
+class OcrEnginesResponse(BaseModel):
+    """Response model listing the OCR engines for the settings picker."""
+
+    engines: list[OcrEngineInfo] = Field(default_factory=list)
+    default: str = Field(..., description="Engine used when none is selected")
 
 
 class HighlightClipRequest(BaseModel):
@@ -859,10 +983,15 @@ class EditingPlanRequest(BaseModel):
     """Request model for file-id based editing plan generation."""
 
     model_size: str = Field("base", description="Whisper model size")
-    api_key: Optional[str] = Field(None, description="Groq API key")
-    llm_model: str = Field(
-        "llama-3.3-70b-versatile", description="Groq LLM model to use"
+    api_key: Optional[str] = Field(None, description="LLM provider API key")
+    api_base_url: Optional[str] = Field(
+        None,
+        description=(
+            "OpenAI-compatible base URL for a custom LLM provider "
+            "(unset = server default / Groq)"
+        ),
     )
+    llm_model: str = Field("llama-3.3-70b-versatile", description="LLM model to use")
     additional_context: str = Field(
         "", description="Additional context or instructions"
     )
@@ -872,10 +1001,15 @@ class DiagramSuggestRequest(BaseModel):
     """Request model for file-id based diagram suggestion."""
 
     model_size: str = Field("base", description="Whisper model size")
-    api_key: Optional[str] = Field(None, description="Groq API key")
-    llm_model: str = Field(
-        "llama-3.3-70b-versatile", description="Groq LLM model to use"
+    api_key: Optional[str] = Field(None, description="LLM provider API key")
+    api_base_url: Optional[str] = Field(
+        None,
+        description=(
+            "OpenAI-compatible base URL for a custom LLM provider "
+            "(unset = server default / Groq)"
+        ),
     )
+    llm_model: str = Field("llama-3.3-70b-versatile", description="LLM model to use")
     additional_context: str = Field(
         "", description="Additional context or instructions"
     )
@@ -902,10 +1036,15 @@ class ProjectChatRequest(BaseModel):
         default_factory=list,
         description="Recent editor activity lines shown in the chat (oldest first)",
     )
-    api_key: Optional[str] = Field(None, description="Groq API key")
-    llm_model: str = Field(
-        "llama-3.3-70b-versatile", description="Groq LLM model to use"
+    api_key: Optional[str] = Field(None, description="LLM provider API key")
+    api_base_url: Optional[str] = Field(
+        None,
+        description=(
+            "OpenAI-compatible base URL for a custom LLM provider "
+            "(unset = server default / Groq)"
+        ),
     )
+    llm_model: str = Field("llama-3.3-70b-versatile", description="LLM model to use")
 
 
 class ChatActionResponse(BaseModel):
@@ -1374,6 +1513,9 @@ async def upload_video(
     video: UploadFile = File(..., description="Video file to upload"),
     project_id: Optional[str] = Form(None, description="Existing project ID"),
     project_name: Optional[str] = Form(None, description="Project name"),
+    project_type: Optional[str] = Form(
+        None, description="Project type: 'standard' or 'gaming'"
+    ),
     session: Session = Depends(get_session),
 ):
     """
@@ -1383,6 +1525,11 @@ async def upload_video(
     """
     if not video.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
+    if project_type is not None and project_type not in PROJECT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown project_type; expected one of {sorted(PROJECT_TYPES)}",
+        )
 
     # Generate unique file ID
     file_id = str(uuid.uuid4())
@@ -1420,8 +1567,13 @@ async def upload_video(
             project = get_project(session, project_id)
             if not project:
                 raise HTTPException(status_code=404, detail="Project not found")
+            if project_type is not None:
+                project.project_type = project_type
         else:
-            project = Project(name=project_name or Path(video.filename).stem)
+            project = Project(
+                name=project_name or Path(video.filename).stem,
+                project_type=project_type or "standard",
+            )
             session.add(project)
             session.commit()
             session.refresh(project)
@@ -1565,6 +1717,150 @@ async def get_audio_pauses(
 # ============================================================================
 
 
+@app.get("/api/projects", response_model=ProjectListResponse)
+async def list_projects(session: Session = Depends(get_session)):
+    """List saved projects for the resume-project screen, newest first.
+
+    Each entry carries the project's (latest) source video and whether that
+    file still exists under ``temp/uploads`` — a project whose source is gone
+    can't be resumed without re-uploading (see the relink endpoint).
+    """
+    projects = session.exec(select(Project).order_by(Project.updated_at.desc())).all()
+    items: list[ProjectListItemResponse] = []
+    for project in projects:
+        asset = session.exec(
+            select(MediaAsset)
+            .where(MediaAsset.project_id == project.id)
+            .order_by(MediaAsset.created_at.desc())
+        ).first()
+        edit_count = len(
+            session.exec(
+                select(EditOperation.id).where(
+                    EditOperation.project_id == project.id,
+                    EditOperation.type != TIMELINE_EDIT_TYPE,
+                )
+            ).all()
+        )
+        items.append(
+            ProjectListItemResponse(
+                id=project.id,
+                name=project.name,
+                project_type=project.project_type,
+                created_at=project.created_at,
+                updated_at=project.updated_at,
+                file_id=asset.file_id if asset else None,
+                media_asset_id=asset.id if asset else None,
+                filename=asset.filename if asset else None,
+                duration=asset.duration if asset else None,
+                size=asset.size if asset else None,
+                source_available=(
+                    asset is not None and resolve_media_path(asset.file_id) is not None
+                ),
+                edit_count=edit_count,
+            )
+        )
+    return ProjectListResponse(projects=items, count=len(items))
+
+
+@app.get("/api/projects/{project_id}/open", response_model=ProjectOpenResponse)
+async def open_project(
+    project_id: str,
+    session: Session = Depends(get_session),
+):
+    """Return everything needed to resume a saved project in the editor.
+
+    The payload mirrors the upload response, so the frontend loads a resumed
+    project through the same path as a fresh upload (waveform, saved edits and
+    timeline all restore from there).
+    """
+    project = ensure_project(session, project_id)
+    asset = session.exec(
+        select(MediaAsset)
+        .where(MediaAsset.project_id == project_id)
+        .order_by(MediaAsset.created_at.desc())
+    ).first()
+    if asset is None:
+        raise HTTPException(
+            status_code=404, detail="Project has no uploaded video to resume"
+        )
+    if resolve_media_path(asset.file_id) is None:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                f"The source video for '{project.name}' is no longer on disk "
+                "(temp/uploads). Re-upload it or relink the project."
+            ),
+        )
+    return ProjectOpenResponse(
+        file_id=asset.file_id,
+        file_url=asset.file_url,
+        filename=asset.filename,
+        size=asset.size,
+        duration=asset.duration,
+        project_id=project.id,
+        media_asset_id=asset.id,
+        name=project.name,
+        project_type=project.project_type,
+    )
+
+
+@app.delete("/api/projects/{project_id}", response_model=ProjectDeleteResponse)
+async def delete_project(
+    project_id: str,
+    delete_files: bool = True,
+    session: Session = Depends(get_session),
+):
+    """Delete a saved project and (by default) its uploaded source videos.
+
+    Removes the project's edit operations, editing plans, stock-footage rows,
+    media assets and the project row itself. ``delete_files=true`` also unlinks
+    each asset's video from ``temp/uploads`` — uploads are multi-GB, so this is
+    how disk space actually comes back.
+    """
+    ensure_project(session, project_id)
+
+    edits = session.exec(
+        select(EditOperation).where(EditOperation.project_id == project_id)
+    ).all()
+    plans = session.exec(
+        select(EditingPlan).where(EditingPlan.project_id == project_id)
+    ).all()
+    footage = session.exec(
+        select(StockFootage).where(StockFootage.project_id == project_id)
+    ).all()
+    assets = session.exec(
+        select(MediaAsset).where(MediaAsset.project_id == project_id)
+    ).all()
+
+    deleted_files: list[str] = []
+    if delete_files:
+        for asset in assets:
+            path = resolve_media_path(asset.file_id)
+            if path is not None:
+                path.unlink(missing_ok=True)
+                deleted_files.append(path.name)
+
+    for row in [*edits, *plans, *footage, *assets]:
+        session.delete(row)
+    project = session.get(Project, project_id)
+    session.delete(project)
+    session.commit()
+
+    logger.info(
+        "Deleted project %s (%d edits, %d assets, %d files)",
+        project_id,
+        len(edits),
+        len(assets),
+        len(deleted_files),
+    )
+    return ProjectDeleteResponse(
+        project_id=project_id,
+        deleted_edits=len(edits),
+        deleted_assets=len(assets),
+        deleted_files=deleted_files,
+    )
+
+
 @app.get("/api/projects/{project_id}", response_model=ProjectResponse)
 async def get_project_endpoint(
     project_id: str,
@@ -1575,6 +1871,7 @@ async def get_project_endpoint(
     return ProjectResponse(
         id=project.id,
         name=project.name,
+        project_type=project.project_type,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -2571,18 +2868,30 @@ async def start_death_detection(
     team: str = "radiant",
     player_slot: Optional[int] = None,
     detect_kda: bool = False,
+    ocr_engine: str = DEFAULT_OCR_ENGINE,
 ):
     """Start a background Dota 2 death-detection job over a recording.
 
     A single HUD scan detects the player's dead intervals and, when
-    ``detect_kda`` is set (and tesseract is available), the kills/deaths/assists
-    event markers for the play bar. ``detect_kda`` is off by default so plain
-    death-cut detection stays fast; the "Detect K/D/A markers" action turns it on
-    (the OCR pass roughly doubles the scan time). Auto-identifies the player's
-    top-bar slot unless ``player_slot`` overrides it (the app's manual selector).
-    Poll ``/api/gaming/death-detect/status/{job_id}`` for the intervals and
-    markers.
+    ``detect_kda`` is set (and the selected OCR engine is available), the
+    kills/deaths/assists event markers for the play bar. ``detect_kda`` is off
+    by default so plain death-cut detection stays fast; the "Detect K/D/A
+    markers" action turns it on (the OCR pass roughly doubles the scan time).
+    ``ocr_engine`` picks which OCR reads the counter (see
+    ``/api/gaming/ocr-engines``; the app's Settings → K/D/A detection).
+    Auto-identifies the player's top-bar slot unless ``player_slot`` overrides
+    it (the app's manual selector). Poll
+    ``/api/gaming/death-detect/status/{job_id}`` for the intervals and markers.
     """
+    if ocr_engine not in OCR_ENGINES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown OCR engine '{ocr_engine}'; known engines: "
+                f"{', '.join(sorted(OCR_ENGINES))}"
+            ),
+        )
+
     try:
         video_path = find_uploaded_video(file_id)
     except FileNotFoundError as e:
@@ -2596,15 +2905,30 @@ async def start_death_detection(
         team=team,
         player_slot=player_slot,
         detect_kda=detect_kda,
+        ocr_engine=ocr_engine,
     )
     logger.info(
-        "Started death-detection job %s for file %s (team=%s, slot=%s)",
+        "Started death-detection job %s for file %s (team=%s, slot=%s, ocr=%s)",
         job.job_id,
         file_id,
         team,
         player_slot,
+        ocr_engine,
     )
     return DeathDetectStartResponse(job_id=job.job_id, status=job.status)
+
+
+@app.get("/api/gaming/ocr-engines", response_model=OcrEnginesResponse)
+async def get_ocr_engines():
+    """List the OCR engines selectable for the K/D/A pass.
+
+    Availability is import-only (fast) — a listed-available engine may still
+    download model weights on its first detection run (PaddleOCR/EasyOCR).
+    """
+    return OcrEnginesResponse(
+        engines=[OcrEngineInfo(**engine) for engine in list_ocr_engines()],
+        default=DEFAULT_OCR_ENGINE,
+    )
 
 
 @app.get(
@@ -2625,6 +2949,7 @@ async def get_death_detection_status(job_id: str):
         player_slot=job.player_slot,
         confidence=job.confidence,
         kda_available=job.kda_available,
+        ocr_engine=job.ocr_engine,
         error=job.error,
     )
 
@@ -3209,11 +3534,18 @@ async def generate_editing_plan_endpoint(
     ),
     api_key: Optional[str] = Form(
         None,
-        description="Groq API key (optional, uses API_KEY env var if not provided)",
+        description="LLM API key (optional, uses API_KEY env var if not provided)",
+    ),
+    api_base_url: Optional[str] = Form(
+        None,
+        description=(
+            "OpenAI-compatible base URL for a custom LLM provider "
+            "(optional, unset = server default / Groq)"
+        ),
     ),
     llm_model: str = Form(
         "llama-3.3-70b-versatile",
-        description="Groq LLM model to use for editing plan generation",
+        description="LLM model to use for editing plan generation",
     ),
     additional_context: str = Form(
         "", description="Additional context or instructions for editing"
@@ -3244,6 +3576,7 @@ async def generate_editing_plan_endpoint(
             api_key=api_key,
             model=llm_model,
             additional_context=additional_context,
+            base_url=api_base_url,
         )
 
         return EditingPlanResponse(editing_plan=editing_plan)
@@ -3280,6 +3613,7 @@ async def generate_editing_plan_by_id(
             api_key=request.api_key,
             model=request.llm_model,
             additional_context=request.additional_context,
+            base_url=request.api_base_url,
         )
 
         # Persist the plan to the owning project (best-effort) so it survives in
@@ -3455,6 +3789,7 @@ async def suggest_diagrams_by_id(
             api_key=request.api_key,
             model=request.llm_model,
             additional_context=request.additional_context,
+            base_url=request.api_base_url,
         )
 
         return DiagramSuggestResponse(diagrams=diagrams)
@@ -3592,6 +3927,7 @@ async def project_chat(
             tool_context=tool_context,
             api_key=request.api_key,
             model=request.llm_model,
+            base_url=request.api_base_url,
         )
         return ProjectChatResponse(
             reply=result.reply,

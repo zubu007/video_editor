@@ -25,6 +25,8 @@ export default function DeathCutsPanel({
   onDetect,
   onSeek,
   onAddCuts,
+  cutPadding,
+  onChangeCutPadding,
   savedCount,
 }) {
   const detecting = status === 'detecting';
@@ -156,6 +158,23 @@ export default function DeathCutsPanel({
                       </li>
                     ))}
                   </ul>
+                  <label className={styles.paddingRow}>
+                    <span>Start cuts after death</span>
+                    <span className={styles.paddingInput}>
+                      <input
+                        type="number"
+                        min="0"
+                        max="10"
+                        step="0.5"
+                        value={cutPadding}
+                        onChange={(e) => onChangeCutPadding(e.target.value)}
+                      />
+                      s
+                    </span>
+                  </label>
+                  <p className={styles.hint}>
+                    Keeps the death moment on screen before cutting away.
+                  </p>
                   <button
                     type="button"
                     className={styles.primaryButton}
