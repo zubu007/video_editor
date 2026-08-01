@@ -2637,13 +2637,16 @@ async def create_highlight_clip(
     file_id: str,
     request: HighlightClipRequest,
     background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
 ):
     """Start a background job that trims a highlight clip between two timestamps.
 
     Re-encoding ``source[start:end]`` with ffmpeg scales with the clip length, so
     the work runs asynchronously instead of blocking the request. Poll
     ``GET /api/gaming/highlight-clip/status/{job_id}`` for the downloadable
-    ``/api/renders`` URL once it is done.
+    ``/api/renders`` URL once it is done. The project's enabled ``captions`` /
+    ``text_caption`` edits ride along so any that overlap the clip get burned in
+    and the download matches the editor.
     """
     if request.end <= request.start:
         raise HTTPException(status_code=400, detail="end must be greater than start")
@@ -2652,6 +2655,28 @@ async def create_highlight_clip(
         video_path = find_uploaded_video(file_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # Caption edits are handed to the worker as plain dicts: it runs in a
+    # background thread with no session, and the worker itself decides which
+    # ones actually overlap the clip.
+    captions_edits: list[dict] = []
+    text_caption_edits: list[dict] = []
+    asset = session.exec(
+        select(MediaAsset).where(MediaAsset.file_id == file_id)
+    ).first()
+    if asset is not None:
+        rows = session.exec(
+            select(EditOperation).where(
+                EditOperation.project_id == asset.project_id,
+                EditOperation.enabled == True,  # noqa: E712
+            )
+        ).all()
+        for row in rows:
+            payload = {"start": row.start, "end": row.end, "details": row.details or {}}
+            if row.type == "captions":
+                captions_edits.append(payload)
+            elif row.type == "text_caption":
+                text_caption_edits.append(payload)
 
     shape = "square" if request.square else "wide"
     output_filename = (
@@ -2670,6 +2695,8 @@ async def create_highlight_clip(
         str(output_path),
         output_filename,
         request.square,
+        captions_edits,
+        text_caption_edits,
     )
     logger.info(
         "Started highlight job %s for file %s (%.2f-%.2fs, %s)",

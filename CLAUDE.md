@@ -169,7 +169,14 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   `-filter_complex` graph, so `highlight_jobs.run_highlight_job(..., square=True)` stays a single
   re-encode pass. Landscape sources only — `plan_reel` raises `ValueError` otherwise and the job
   records it. Driven by `square` on `POST /api/gaming/highlight-clip/{file_id}` (the panel's
-  "Crop to square for reels" checkbox, on by default).
+  "Crop to square for reels" checkbox, on by default). Highlight clips also carry the project's
+  burned-in captions: the endpoint looks up the `MediaAsset`'s enabled `captions` / `text_caption`
+  edits and hands them to the worker as plain dicts, which burns the ones overlapping the clip as
+  further ffmpeg passes after the trim (transcript captions first, then notes). Remapping is the
+  contiguous-slice special case — clamp to the clip, shift by `-start`
+  (`caption_words_for_clip` / `text_captions_for_clip` in `highlight_jobs.py`) — and the ASS is
+  sized to the trimmed video, so it stays correct after the square crop (bottom-positioned notes
+  can overlap the composited minimap there).
 
 ### Persistence ([backend/storage/database.py](backend/storage/database.py))
 
