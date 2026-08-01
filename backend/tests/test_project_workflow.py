@@ -706,6 +706,96 @@ def test_bulk_edits_reject_unknown_caption_style():
         app.dependency_overrides.clear()
 
 
+def test_highlight_clip_forwards_caption_edits_to_the_worker():
+    client, engine = create_test_client()
+    video_path = Path("temp/uploads") / "highlight-captions-test.mp4"
+    try:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"fake video")
+
+        with Session(engine) as session:
+            project = Project(name="Highlight Captions Project")
+            session.add(project)
+            session.commit()
+            session.refresh(project)
+            project_id = project.id
+
+            media_asset = MediaAsset(
+                project_id=project_id,
+                file_id="highlight-captions-test",
+                filename="source.mp4",
+                file_url="/api/video/highlight-captions-test",
+                size=10,
+            )
+            session.add(media_asset)
+            session.commit()
+
+        response = client.post(
+            f"/api/projects/{project_id}/edits/bulk",
+            json={
+                "edits": [
+                    {
+                        "type": "captions",
+                        "source": "captions_tool",
+                        "start": 0,
+                        "end": 60,
+                        "metadata": {
+                            "style": "rainbow",
+                            "words": [{"start": 12.0, "end": 12.5, "word": "gg"}],
+                        },
+                    },
+                    {
+                        "type": "text_caption",
+                        "source": "notes_tool",
+                        "start": 14,
+                        "end": 18,
+                        "metadata": {"text": "nice play", "position": "top"},
+                    },
+                ]
+            },
+        )
+        assert response.status_code == 200
+
+        # Disabled edits must not ride along.
+        disabled = client.post(
+            f"/api/projects/{project_id}/edits/bulk",
+            json={
+                "edits": [
+                    {
+                        "type": "text_caption",
+                        "source": "notes_tool",
+                        "start": 20,
+                        "end": 22,
+                        "metadata": {"text": "hidden"},
+                    }
+                ]
+            },
+        )
+        assert disabled.status_code == 200
+        client.patch(
+            f"/api/projects/{project_id}/edits/{disabled.json()['edits'][0]['id']}",
+            json={"enabled": False},
+        )
+
+        with patch("backend.app.run_highlight_job") as mock_job:
+            response = client.post(
+                "/api/gaming/highlight-clip/highlight-captions-test",
+                json={"start": 10.0, "end": 25.0},
+            )
+        assert response.status_code == 200
+
+        args = mock_job.call_args.args
+        captions_edits, text_caption_edits = args[-2], args[-1]
+        assert len(captions_edits) == 1
+        assert captions_edits[0]["details"]["style"] == "rainbow"
+        assert captions_edits[0]["details"]["words"][0]["word"] == "gg"
+        assert len(text_caption_edits) == 1
+        assert text_caption_edits[0]["details"]["text"] == "nice play"
+    finally:
+        video_path.unlink(missing_ok=True)
+        app.dependency_overrides.clear()
+
+
 def test_caption_styles_endpoint_lists_presets():
     client, _ = create_test_client()
     try:

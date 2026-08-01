@@ -18,6 +18,7 @@ from backend.features.gaming.death_detect import (
     _colour_signature,
     _death_event_times,
     _death_intervals_from_runs,
+    _default_sample_times,
     _match_slot,
     _ocr_kda,
     _respawn_signal,
@@ -56,6 +57,37 @@ def test_respawn_box_brackets_the_slot():
     lay = DotaHudLayout()
     x0, y0, x1, y1 = lay.respawn_box(816)
     assert x0 < 816 < x1 and y0 < y1
+
+
+def test_team_centers_for_both_teams():
+    lay = DotaHudLayout()
+    assert len(lay.team_centers("radiant")) == 5
+    assert len(lay.team_centers("dire")) == 5
+    with pytest.raises(ValueError):
+        lay.team_centers("neutral")
+
+
+def test_dire_centers_mirror_radiant_about_frame_centre():
+    # The top bar is symmetric about the horizontal centre (measured on sample
+    # footage to within a few px), and both sides sit right of/left of it.
+    lay = DotaHudLayout()
+    mirrored = [lay.width - c for c in reversed(lay.radiant_centers)]
+    for dire, mirror in zip(lay.dire_centers, mirrored):
+        assert abs(dire - mirror) <= 12
+    assert all(c > lay.width / 2 for c in lay.dire_centers)
+    assert list(lay.dire_centers) == sorted(lay.dire_centers)
+
+
+def test_default_sample_times_avoid_pregame():
+    # Recordings often include the pick phase / pre-game strategy screens at the
+    # start, where the top bar uses different layouts — samples must sit in the
+    # mid-game stretch.
+    times = _default_sample_times(2000.0)
+    assert min(times) >= 0.25 * 2000.0
+    assert max(times) <= 0.85 * 2000.0
+    assert len(times) >= 10
+    # Unknown duration falls back to the early-game spread.
+    assert _default_sample_times(0.0)[0] == 40.0
 
 
 # ---------------------------------------------------------------- colour match
