@@ -64,14 +64,20 @@ _MATCH_MIN_SCORE = 0.15
 _GOLD_H_LO, _GOLD_H_HI = 12, 32  # OpenCV hue range for the box's gold border
 _GOLD_MIN_SAT, _GOLD_MIN_VAL = 110, 140
 _GOLD_FRACTION = 0.03
-# A golden run must span at least this many samples to start one.
-_MIN_RESPAWN_SAMPLES = 2
-# Real deaths keep you dead at least this long as one *continuous* run; shorter
-# golden blips (and intermittent flicker) are UI noise. Runs are deliberately
-# not merged across gaps — a solid respawn box never flickers, so a gap means
-# two separate events, not one. (An ultra-short early respawn isn't worth
-# cutting anyway.)
-_MIN_DEATH_SECONDS = 5.0
+# Coarse scan and state persistence. The state machine confirms transitions
+# instead of filtering by total dead duration: a quick buyback can legitimately
+# end the timer in under five seconds, while a one-sample dropout is just HUD
+# flicker and must not end the interval.
+_COARSE_FPS = 2.0
+_COARSE_ENTER_SAMPLES = 2
+_COARSE_EXIT_SAMPLES = 2
+
+# Candidate transitions are re-decoded only in this small neighbourhood. At
+# 15 fps, three stable frames give a 200 ms persistence check while preserving
+# the first frame of the transition as the returned boundary.
+_REFINE_FPS = 15.0
+_REFINE_WINDOW_SECONDS = 1.5
+_REFINE_STABLE_SAMPLES = 3
 # A run is "K/D/A-confirmed" if a deaths increment lands within this window of
 # its start (optional corroboration only).
 _DEATH_MATCH_WINDOW = 8.0
@@ -408,6 +414,63 @@ def _stream_top_strip(video_path: str | Path, fps: float, width: int, strip_h: i
         proc.wait()
 
 
+def _stream_top_strip_window(
+    video_path: str | Path,
+    start: float,
+    end: float,
+    fps: float,
+    width: int,
+    strip_h: int,
+):
+    """Yield top-HUD frames for a short source-time window.
+
+    The full match is scanned coarsely; this decoder is used only around a
+    candidate timer appearance/disappearance so the final boundaries retain
+    sub-second precision without paying full-rate decode cost for the match.
+    """
+    start = max(0.0, float(start))
+    duration = max(0.0, float(end) - start)
+    if duration <= 0:
+        return
+    cmd = [
+        _ffmpeg_exe(),
+        "-v",
+        "error",
+        "-ss",
+        f"{start:.6f}",
+        "-i",
+        str(video_path),
+        "-t",
+        f"{duration:.6f}",
+        "-vf",
+        f"fps={fps},crop={width}:{strip_h}:0:0",
+        "-pix_fmt",
+        "bgr24",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    frame_bytes = width * strip_h * 3
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 8)
+    index = 0
+    try:
+        while True:
+            buf = proc.stdout.read(frame_bytes)
+            while 0 < len(buf) < frame_bytes:
+                more = proc.stdout.read(frame_bytes - len(buf))
+                if not more:
+                    break
+                buf += more
+            if len(buf) < frame_bytes:
+                break
+            strip = np.frombuffer(buf, np.uint8).reshape(strip_h, width, 3)
+            yield start + index / fps, strip
+            index += 1
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
 def _ocr_available(engine: str = DEFAULT_OCR_ENGINE) -> bool:
     """Whether the selected OCR engine can run (see :mod:`.ocr`)."""
     return engine_available(engine)[0]
@@ -508,6 +571,131 @@ def _signal_runs(
         step = times[1] - times[0] if len(times) > 1 else 1.0
         runs.append({"start": times[start], "end": times[-1] + step})
     return runs
+
+
+def _dead_state_runs(
+    times: list[float],
+    signal: list[float],
+    *,
+    threshold: float,
+    enter_samples: int,
+    exit_samples: int,
+) -> list[dict]:
+    """Return persistent dead-state runs while bridging brief timer dropouts.
+
+    Boundaries are the first samples of the confirmed transitions, not the
+    later samples that complete the persistence check. No minimum duration is
+    applied, so a quick buyback remains a valid interval.
+    """
+    if not times or len(times) != len(signal):
+        return []
+    enter_samples = max(1, int(enter_samples))
+    exit_samples = max(1, int(exit_samples))
+    runs: list[dict] = []
+    dead = False
+    start_time: float | None = None
+    enter_start: int | None = None
+    exit_start: int | None = None
+
+    for index, value in enumerate(signal):
+        is_dead = value > threshold
+        if not dead:
+            if is_dead:
+                if enter_start is None:
+                    enter_start = index
+                if index - enter_start + 1 >= enter_samples:
+                    dead = True
+                    start_time = times[enter_start]
+                    enter_start = None
+            else:
+                enter_start = None
+            continue
+
+        if is_dead:
+            exit_start = None
+            continue
+        if exit_start is None:
+            exit_start = index
+        if index - exit_start + 1 >= exit_samples:
+            runs.append({"start": start_time, "end": times[exit_start]})
+            dead = False
+            start_time = None
+            exit_start = None
+
+    if dead and start_time is not None:
+        if exit_start is not None:
+            end_time = times[exit_start]
+        else:
+            step = times[1] - times[0] if len(times) > 1 else 1.0
+            end_time = times[-1] + step
+        runs.append({"start": start_time, "end": end_time})
+    return runs
+
+
+def _stable_transition_time(
+    times: list[float],
+    signal: list[float],
+    *,
+    target_dead: bool,
+    threshold: float,
+    stable_samples: int,
+) -> float | None:
+    """Find the first frame of a persistent alive/dead transition.
+
+    The opposite state must appear earlier in the window. This prevents a
+    refinement window that starts after the transition from inventing a new
+    boundary at the window edge.
+    """
+    if len(times) != len(signal):
+        return None
+    stable_samples = max(1, int(stable_samples))
+    seen_opposite = False
+    candidate: int | None = None
+    for index, value in enumerate(signal):
+        is_dead = value > threshold
+        if is_dead != target_dead:
+            seen_opposite = True
+            candidate = None
+            continue
+        if not seen_opposite:
+            continue
+        if candidate is None:
+            candidate = index
+        if index - candidate + 1 >= stable_samples:
+            return times[candidate]
+    return None
+
+
+def _refine_dead_interval(
+    coarse: dict,
+    start_times: list[float],
+    start_signal: list[float],
+    end_times: list[float],
+    end_signal: list[float],
+    *,
+    threshold: float,
+    stable_samples: int,
+) -> dict:
+    """Refine a coarse timer run, falling back per unreadable transition."""
+    start = _stable_transition_time(
+        start_times,
+        start_signal,
+        target_dead=True,
+        threshold=threshold,
+        stable_samples=stable_samples,
+    )
+    end = _stable_transition_time(
+        end_times,
+        end_signal,
+        target_dead=False,
+        threshold=threshold,
+        stable_samples=stable_samples,
+    )
+    refined_start = float(coarse["start"]) if start is None else start
+    refined_end = float(coarse["end"]) if end is None else end
+    if refined_end <= refined_start:
+        return {"start": float(coarse["start"]), "end": float(coarse["end"])}
+    return {"start": refined_start, "end": refined_end}
 
 
 def _death_event_times(deaths_series: list[int], times: list[float]) -> list[float]:

@@ -16,13 +16,16 @@ import pytest
 from backend.features.gaming.death_detect import (
     DotaHudLayout,
     _colour_signature,
+    _dead_state_runs,
     _death_event_times,
     _death_intervals_from_runs,
     _default_sample_times,
     _match_slot,
     _ocr_kda,
+    _refine_dead_interval,
     _respawn_signal,
     _signal_runs,
+    _stable_transition_time,
     detect_death_intervals,
 )
 
@@ -129,6 +132,90 @@ def test_signal_runs_drops_too_short_runs():
     times = list(range(5))
     signal = [0, 0.2, 0, 0, 0]  # single sample, below min_samples
     assert _signal_runs(times, signal, threshold=0.05, min_samples=2) == []
+
+
+def test_dead_state_runs_bridges_single_timer_dropout():
+    """A one-sample missing timer must not split an ongoing death."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+    signal = [0.0, 0.08, 0.09, 0.0, 0.08, 0.0]
+
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=0.03,
+        enter_samples=1,
+        exit_samples=2,
+    )
+
+    assert runs == [{"start": 0.5, "end": 2.5}]
+
+
+def test_dead_state_runs_keeps_quick_buyback_interval():
+    """A stable dead state under five seconds is still a real death."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    signal = [0.0, 0.08, 0.09, 0.08, 0.0, 0.0, 0.0]
+
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=0.03,
+        enter_samples=2,
+        exit_samples=2,
+    )
+
+    assert runs == [{"start": 0.5, "end": 2.0}]
+
+
+def test_stable_transition_returns_first_frame_not_confirmation_frame():
+    times = [10.0, 10.1, 10.2, 10.3, 10.4]
+    signal = [0.08, 0.07, 0.0, 0.0, 0.0]
+
+    assert (
+        _stable_transition_time(
+            times,
+            signal,
+            target_dead=False,
+            threshold=0.03,
+            stable_samples=3,
+        )
+        == 10.2
+    )
+
+
+def test_refine_dead_interval_uses_precise_start_and_buyback_boundaries():
+    coarse = {"start": 100.0, "end": 104.0}
+    start_times = [99.8, 99.9, 100.0, 100.1, 100.2]
+    start_signal = [0.0, 0.0, 0.07, 0.08, 0.08]
+    end_times = [103.8, 103.9, 104.0, 104.1, 104.2]
+    end_signal = [0.08, 0.08, 0.0, 0.0, 0.0]
+
+    refined = _refine_dead_interval(
+        coarse,
+        start_times,
+        start_signal,
+        end_times,
+        end_signal,
+        threshold=0.03,
+        stable_samples=3,
+    )
+
+    assert refined == {"start": 100.0, "end": 104.0}
+
+
+def test_refine_dead_interval_falls_back_when_transition_is_unreadable():
+    coarse = {"start": 100.0, "end": 104.0}
+
+    refined = _refine_dead_interval(
+        coarse,
+        [99.8, 99.9, 100.0],
+        [0.0, 0.0, 0.0],
+        [103.8, 103.9, 104.0],
+        [0.08, 0.08, 0.08],
+        threshold=0.03,
+        stable_samples=2,
+    )
+
+    assert refined == coarse
 
 
 def test_ocr_kda_rejects_dips_and_implausible_jumps(monkeypatch):
