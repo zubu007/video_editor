@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import functools
 import itertools
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import proglog
@@ -13,6 +17,8 @@ from moviepy import (
 )
 
 from backend.features.face_detection.detect import detect_face_center
+
+logger = logging.getLogger(__name__)
 
 # Stock B-roll files with these extensions are still images, not videos.
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -132,6 +138,48 @@ def _fit_frame(clip, width: int, height: int):
     return _crop(scaled, width, height, scaled.w / 2, scaled.h / 2)
 
 
+_OPEN_CLIPS: ContextVar[list | None] = ContextVar("open_clips", default=None)
+
+
+def _track(clip):
+    """Register ``clip`` for closing when the active render finishes."""
+    registry = _OPEN_CLIPS.get()
+    if registry is not None:
+        registry.append(clip)
+    return clip
+
+
+@contextmanager
+def _clip_scope() -> Iterator[None]:
+    """Close every clip tracked inside the block, even if the render fails.
+
+    MoviePy clips hold ffmpeg subprocesses and file descriptors; leaving them
+    open leaks both on every render of a long-running server.
+    """
+    registry: list = []
+    token = _OPEN_CLIPS.set(registry)
+    try:
+        yield
+    finally:
+        _OPEN_CLIPS.reset(token)
+        for clip in reversed(registry):
+            try:
+                clip.close()
+            except Exception:
+                logger.debug("Failed to close clip", exc_info=True)
+
+
+def _closes_clips(func):
+    """Run ``func`` inside a :func:`_clip_scope`."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _clip_scope():
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 def _stock_clip(footage_path: str, duration: float):
     """Load stock footage trimmed (or looped) to exactly ``duration`` seconds.
 
@@ -142,14 +190,14 @@ def _stock_clip(footage_path: str, duration: float):
     single decoder); when longer it is trimmed from the start.
     """
     if Path(footage_path).suffix.lower() in IMAGE_EXTENSIONS:
-        return _with_duration(ImageClip(footage_path), duration)
+        return _with_duration(_track(ImageClip(footage_path)), duration)
 
-    clip = VideoFileClip(footage_path)
+    clip = _track(VideoFileClip(footage_path))
     if clip.duration >= duration:
         fitted = _subclip(clip, 0, duration)
     else:
         copies = [
-            VideoFileClip(footage_path)
+            _track(VideoFileClip(footage_path))
             for _ in range(int(duration // clip.duration) + 1)
         ]
         fitted = _subclip(concatenate_videoclips(copies), 0, duration)
@@ -296,6 +344,7 @@ def _segment_spans(
     return spans
 
 
+@_closes_clips
 def render_with_edits(
     video_path: str,
     cut_ranges: list,
@@ -333,7 +382,7 @@ def render_with_edits(
         on_progress (ProgressCallback | None): Called with the frame-write
             progress as a 0.0–1.0 fraction while the output is encoded.
     """
-    video = VideoFileClip(video_path)
+    video = _track(VideoFileClip(video_path))
     sorted_zooms = sorted(zoom_ranges, key=lambda r: r["start"])
     sorted_stock = sorted(stock_footage_ranges or [], key=lambda r: r["start"])
     sorted_diagrams = sorted(diagram_ranges or [], key=lambda r: r["start"])
@@ -366,7 +415,7 @@ def _load_diagram_overlays(diagram_ranges: list) -> dict:
     for r in diagram_ranges:
         path = r.get("overlay_path")
         if path and path not in overlays:
-            overlays[path] = VideoFileClip(path, has_mask=path.endswith(".mov"))
+            overlays[path] = _track(VideoFileClip(path, has_mask=path.endswith(".mov")))
     return overlays
 
 
@@ -413,7 +462,7 @@ def _write_concatenated(
     """
     logger = _RenderProgressLogger(on_progress) if on_progress else "bar"
     if clips:
-        final_clip = concatenate_videoclips(clips)
+        final_clip = _track(concatenate_videoclips(clips))
         # Still-image overlays have no fps of their own; fall back to the source's.
         fps = getattr(final_clip, "fps", None) or video.fps
         final_clip.write_videofile(
@@ -426,6 +475,7 @@ def _write_concatenated(
         )
 
 
+@_closes_clips
 def render_timeline(
     video_path: str,
     segments: list,
@@ -459,7 +509,7 @@ def render_timeline(
         on_progress (ProgressCallback | None): Called with the frame-write
             progress as a 0.0–1.0 fraction while the output is encoded.
     """
-    video = VideoFileClip(video_path)
+    video = _track(VideoFileClip(video_path))
     duration = float(video.duration)
     cuts = sorted(cut_ranges or [], key=lambda r: r["start"])
     zooms = sorted(zoom_ranges or [], key=lambda r: r["start"])
