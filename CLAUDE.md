@@ -167,7 +167,11 @@ a common dict shape: time ranges are `{"start", "end"}` and words are `{"start",
   frontend's **"Deaths" tab** (`EditorTools/DeathCutsPanel`, shown only for gaming-mode projects):
   `POST /api/gaming/detect-deaths/{file_id}` → poll `GET /api/gaming/death-detect/status/{job_id}`;
   `GET /api/gaming/slot-preview/{file_id}` returns the auto slot + 5 base64 portrait thumbnails for
-  a **manual slot selector** (override the auto-match when it's wrong). Detected ranges save as
+  a **required slot selector** (the auto-match is only a suggestion; the Deaths tab disables
+  detection until the user picks their portrait). Detection is coarse-to-fine: a persistent
+  state machine over a low-rate top-strip scan finds dead runs (short buyback deaths kept), then
+  each boundary is re-decoded at a higher rate; the first stable timer disappearance ends the
+  cut for both respawns and buybacks. Detected ranges save as
   `cut` EditOperations (`source="death_detection"`). Both teams' slot centres are calibrated
   (Dire mirrors Radiant about the frame centre); slot auto-ID samples the mid-game stretch
   (25–85% of duration) because pick-phase/pre-game top-bar layouts poison the colour vote. See

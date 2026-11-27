@@ -17,9 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
-
-from backend.features.llm import DEFAULT_MODEL, create_chat_client
 
 from backend.features.diagram.schema import (
     DIAGRAM_TYPES,
@@ -29,6 +26,7 @@ from backend.features.diagram.schema import (
     MIN_NODES,
     validate_suggestions,
 )
+from backend.features.llm import DEFAULT_MODEL, create_chat_client
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +86,9 @@ class DiagramDetectorLLM:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         model: str = DEFAULT_MODEL,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         """Initializes the LLM client.
 
@@ -299,10 +297,10 @@ Design the diagram for this section and return it as a JSON object with "title" 
 
 def suggest_diagrams(
     transcript: list,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     model: str = DEFAULT_MODEL,
     additional_context: str = "",
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
 ) -> list:
     """Suggests animated diagram overlays for a video based on its transcript.
 

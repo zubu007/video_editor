@@ -15,6 +15,57 @@ A simple video editing tool with a FastAPI backend for automated podcast video e
 
 ## Quick Start
 
+### Windows: full Dota 2 gameplay to death-cut video
+
+For the Dota workflow, install these prerequisites first:
+
+- [Git for Windows](https://git-scm.com/download/win)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- [Node.js](https://nodejs.org/) 20.19+ (20.x) or 22.12+ (current LTS recommended)
+
+Then open PowerShell and run:
+
+```powershell
+git clone https://github.com/zubu007/video_editor.git
+cd video_editor
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts/start-windows.ps1
+```
+
+The setup script creates a locked Python 3.11 environment and installs the
+frontend. The start script runs both services; open <http://127.0.0.1:5173> if
+the browser does not open it automatically. Press `Ctrl+C` in that PowerShell
+window to stop both services.
+
+No API key, Whisper model, or Tesseract installation is required for death
+detection and death cuts. Tesseract is optional and is used only for the extra
+K/D/A markers on the timeline.
+
+#### Editing one complete gameplay recording
+
+1. Choose **Edit a gaming video** and upload the complete landscape recording.
+2. Open **Deaths**, choose Radiant or Dire, and select **Load hero portraits**.
+3. Click your own hero in the top bar. The automatic suggestion is only a hint;
+   choosing the correct slot is required for reliable detection.
+4. Select **Detect deaths**. A full match normally takes a minute or two to scan.
+5. Review the detected intervals. Set **Start cuts after death** to `0` if you
+   want to remove from the first detected dead frame, or leave a small value to
+   keep the death moment visible.
+6. Select **Add cuts**, then **Render / Export**, render the project, and download
+   the finished MP4.
+
+The detector watches the golden respawn countdown below the selected hero's
+top-bar portrait. A cut ends when that countdown disappears, so it handles a
+normal respawn, buyback, or Aegis return. If the recording ends while the hero
+is dead, the final dead interval is kept through the end of the recording.
+
+Detection is calibrated for a visible, standard Dota HUD (1920x1080 geometry,
+scaled proportionally for other landscape resolutions). A custom HUD scale,
+cropped HUD, replay/spectator layout, hidden top bar, or the wrong team/hero slot
+can produce incorrect intervals. Always review the interval list before the
+final render. Uploaded sources live in `temp/uploads`; rendered downloads live
+in `temp/outputs` and are also available through the app.
+
 ### 1. Install Dependencies
 
 ```bash

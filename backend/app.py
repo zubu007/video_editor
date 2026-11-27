@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import aiofiles
 import imageio_ffmpeg
@@ -32,7 +32,15 @@ from moviepy import VideoFileClip
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
+from backend.features.assistant.chat import (
+    build_project_context,
+    generate_chat_reply,
+)
+from backend.features.assistant.tools import ToolContext
 from backend.features.audio.extract import get_waveform_data_from_file_id
+from backend.features.ranking import store as ranking_store
+from backend.features.ranking.routes import router as ranking_router
+from backend.features.voiceover.routes import router as voiceover_router
 from backend.features.audio_pause.detect import (
     apply_pause_padding,
     detect_audio_pauses,
@@ -45,46 +53,19 @@ from backend.features.caption_removal.jobs import (
     run_caption_removal_job,
 )
 from backend.features.caption_removal.remove import DEFAULT_MODE, use_gpu_from_env
-from backend.features.gaming import extract_slot_previews
-from backend.features.gaming.jobs import (
-    create_job as create_death_detect_job,
-    get_job as get_death_detect_job,
-    run_death_detect_job,
-)
-from backend.features.gaming.ocr import (
-    DEFAULT_OCR_ENGINE,
-    OCR_ENGINES,
-    list_engines as list_ocr_engines,
-)
-from backend.features.transcript.jobs import (
-    create_job as create_transcript_job,
-    get_job as get_transcript_job,
-    run_transcript_job,
-)
-from backend.features.gaming.highlight_jobs import (
-    create_job as create_highlight_job,
-    get_job as get_highlight_job,
-    run_highlight_job,
-)
 from backend.features.captions import (
     DEFAULT_STYLE as DEFAULT_CAPTION_STYLE,
+)
+from backend.features.captions import (
     STYLE_PRESETS as CAPTION_STYLE_PRESETS,
+)
+from backend.features.captions import (
     add_captions,
     add_text_captions,
     output_intervals,
     remap_words,
     video_duration,
 )
-from backend.features.youtube.jobs import (
-    create_job as create_download_job,
-    get_job as get_download_job,
-    run_download_job,
-)
-from backend.features.assistant.chat import (
-    build_project_context,
-    generate_chat_reply,
-)
-from backend.features.assistant.tools import ToolContext
 from backend.features.diagram.detector import suggest_diagrams
 from backend.features.diagram.renderer import get_or_render_overlay
 from backend.features.diagram.schema import normalize_layout, validate_graph
@@ -94,16 +75,36 @@ from backend.features.editing_plan.feature_registry import (
 )
 from backend.features.editing_plan.generator import generate_editing_plan
 from backend.features.filler_words.detect import detect_filler_words
+from backend.features.gaming import extract_slot_previews
+from backend.features.gaming.highlight_jobs import (
+    create_job as create_highlight_job,
+)
+from backend.features.gaming.highlight_jobs import (
+    get_job as get_highlight_job,
+)
+from backend.features.gaming.highlight_jobs import (
+    run_highlight_job,
+)
+from backend.features.gaming.jobs import (
+    create_job as create_death_detect_job,
+)
+from backend.features.gaming.jobs import (
+    get_job as get_death_detect_job,
+)
+from backend.features.gaming.jobs import (
+    run_death_detect_job,
+)
+from backend.features.gaming.ocr import (
+    DEFAULT_OCR_ENGINE,
+    OCR_ENGINES,
+)
+from backend.features.gaming.ocr import (
+    list_engines as list_ocr_engines,
+)
 from backend.features.pexels.download import (
     PexelsAPIError,
     download_stock_footage,
     download_stock_media,
-)
-from backend.features.system.gpu import detect_gpus, detect_tool_cuda
-from backend.features.transcript.extract import (
-    extract_transcript_as_segments,
-    extract_transcript_as_sentences,
-    extract_transcript_as_words,
 )
 from backend.features.project_io import (
     PROJECT_FILE_EXTENSION,
@@ -112,6 +113,21 @@ from backend.features.project_io import (
     load_project_file,
 )
 from backend.features.project_io.import_ import ProjectFileError
+from backend.features.system.gpu import detect_gpus, detect_tool_cuda
+from backend.features.transcript.extract import (
+    extract_transcript_as_segments,
+    extract_transcript_as_sentences,
+    extract_transcript_as_words,
+)
+from backend.features.transcript.jobs import (
+    create_job as create_transcript_job,
+)
+from backend.features.transcript.jobs import (
+    get_job as get_transcript_job,
+)
+from backend.features.transcript.jobs import (
+    run_transcript_job,
+)
 from backend.features.video_cutter.cut import (
     IMAGE_EXTENSIONS,
     cut_filler_words,
@@ -120,8 +136,21 @@ from backend.features.video_cutter.cut import (
 )
 from backend.features.video_cutter.jobs import (
     create_job as create_render_job,
+)
+from backend.features.video_cutter.jobs import (
     get_job as get_render_job,
+)
+from backend.features.video_cutter.jobs import (
     update_job as update_render_job,
+)
+from backend.features.youtube.jobs import (
+    create_job as create_download_job,
+)
+from backend.features.youtube.jobs import (
+    get_job as get_download_job,
+)
+from backend.features.youtube.jobs import (
+    run_download_job,
 )
 from backend.storage.database import (
     EditingPlan,
@@ -160,6 +189,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.include_router(voiceover_router)
+app.include_router(ranking_router)
 
 # Add CORS middleware
 app.add_middleware(
@@ -242,6 +273,8 @@ SUPPORTED_EDIT_TYPES = {
 TIMELINE_EDIT_TYPE = "timeline_segment"
 # Project kinds; "gaming" surfaces the Deaths/Highlights tabs when reopened.
 PROJECT_TYPES = {"standard", "gaming"}
+# Created only through /api/ranking/projects (it needs a composition document).
+RANKING_PROJECT_TYPE = "ranking"
 # Refuse uploads that would leave less than this much free disk. A full disk
 # mid-write corrupts nothing here (temp files), but it kills ffmpeg/SQLite in
 # confusing ways downstream — fail early with a clear message instead.
@@ -290,21 +323,21 @@ class EditingDecision(BaseModel):
     start: float = Field(..., description="Start time in seconds")
     end: float = Field(..., description="End time in seconds")
     feature: str = Field(..., description="Feature/effect to apply")
-    parameters: Optional[dict] = Field(None, description="Feature parameters")
-    reason: Optional[str] = Field(None, description="Reason for the decision")
+    parameters: dict | None = Field(None, description="Feature parameters")
+    reason: str | None = Field(None, description="Reason for the decision")
 
 
 class TranscriptResponse(BaseModel):
     """Response model for transcript extraction."""
 
-    language: Optional[str] = None
+    language: str | None = None
     segments: list[TranscriptSegment] = []
 
 
 class TranscriptWordsResponse(BaseModel):
     """Response model for word-level transcript extraction."""
 
-    language: Optional[str] = None
+    language: str | None = None
     words: list[TranscriptWord] = []
 
 
@@ -322,7 +355,7 @@ class TranscriptJobStatusResponse(BaseModel):
     status: str = Field(..., description="pending, running, done, or error")
     progress: float = Field(0.0, description="0.0-1.0 completion fraction")
     words: list[TranscriptWord] = []
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class FillerWordsResponse(BaseModel):
@@ -343,7 +376,7 @@ class DiagramNode(BaseModel):
 
     id: str = Field(..., description="Unique node id within the graph")
     label: str = Field(..., description="Short on-screen label")
-    reveal_at: Optional[float] = Field(
+    reveal_at: float | None = Field(
         None,
         description="When the node animates in, in seconds from the segment start",
     )
@@ -354,7 +387,7 @@ class DiagramEdge(BaseModel):
 
     source: str = Field(..., description="Id of the source node")
     target: str = Field(..., description="Id of the target node")
-    label: Optional[str] = Field(None, description="Optional edge label")
+    label: str | None = Field(None, description="Optional edge label")
 
 
 class DiagramGraph(BaseModel):
@@ -401,7 +434,7 @@ class DiagramRenderRequest(BaseModel):
     graph: dict = Field(
         ..., description="Graph spec with nodes, edges and reveal_order"
     )
-    background: Optional[str] = Field(
+    background: str | None = Field(
         None,
         description=(
             "Background of the rendered clip: 'transparent' or omitted for the "
@@ -439,7 +472,7 @@ class VideoUploadResponse(BaseModel):
     file_url: str = Field(..., description="URL to access the video")
     filename: str = Field(..., description="Original filename")
     size: int = Field(..., description="File size in bytes")
-    duration: Optional[float] = Field(None, description="Video duration in seconds")
+    duration: float | None = Field(None, description="Video duration in seconds")
     project_id: str = Field(..., description="Project that owns the uploaded video")
     media_asset_id: str = Field(..., description="Stored media asset ID")
 
@@ -462,17 +495,21 @@ class ProjectListItemResponse(BaseModel):
     project_type: str
     created_at: datetime
     updated_at: datetime
-    file_id: Optional[str] = Field(
+    file_id: str | None = Field(
         None, description="The project's source video, if one was uploaded"
     )
-    media_asset_id: Optional[str] = None
-    filename: Optional[str] = None
-    duration: Optional[float] = None
-    size: Optional[int] = None
+    media_asset_id: str | None = None
+    filename: str | None = None
+    duration: float | None = None
+    size: int | None = None
     source_available: bool = Field(
         False, description="Whether the source video still exists on disk"
     )
     edit_count: int = 0
+    clip_count: int | None = Field(None, description="Ranking projects: clip slots")
+    missing_sources: int | None = Field(
+        None, description="Ranking projects: slots without available media"
+    )
 
 
 class ProjectListResponse(BaseModel):
@@ -493,7 +530,7 @@ class ProjectOpenResponse(BaseModel):
     file_url: str
     filename: str
     size: int
-    duration: Optional[float] = None
+    duration: float | None = None
     project_id: str
     media_asset_id: str
     name: str
@@ -518,7 +555,7 @@ class MediaAssetResponse(BaseModel):
     filename: str
     file_url: str
     size: int
-    duration: Optional[float] = None
+    duration: float | None = None
     created_at: datetime
 
 
@@ -531,16 +568,16 @@ class EditOperationCreate(BaseModel):
     end: float = Field(..., gt=0, description="End time in seconds")
     enabled: bool = Field(True, description="Whether this edit should be rendered")
     metadata: dict[str, Any] = Field(default_factory=dict)
-    media_asset_id: Optional[str] = None
+    media_asset_id: str | None = None
 
 
 class EditOperationUpdate(BaseModel):
     """Request model for updating a stored edit operation."""
 
-    enabled: Optional[bool] = None
-    start: Optional[float] = Field(None, ge=0)
-    end: Optional[float] = Field(None, gt=0)
-    metadata: Optional[dict[str, Any]] = None
+    enabled: bool | None = None
+    start: float | None = Field(None, ge=0)
+    end: float | None = Field(None, gt=0)
+    metadata: dict[str, Any] | None = None
 
 
 class BulkEditOperationsRequest(BaseModel):
@@ -554,7 +591,7 @@ class EditOperationResponse(BaseModel):
 
     id: str
     project_id: str
-    media_asset_id: Optional[str] = None
+    media_asset_id: str | None = None
     type: str
     source: str
     start: float
@@ -585,7 +622,7 @@ class TimelineUpdateRequest(BaseModel):
         default_factory=list,
         description="Ordered segments; an empty list clears the timeline",
     )
-    media_asset_id: Optional[str] = None
+    media_asset_id: str | None = None
 
 
 class TimelineSegmentResponse(BaseModel):
@@ -643,10 +680,10 @@ class RenderStatusResponse(BaseModel):
     progress: float = Field(
         0.0, ge=0.0, le=1.0, description="Render completion as a 0.0–1.0 fraction."
     )
-    output_url: Optional[str] = None
-    filename: Optional[str] = None
-    applied_edits: Optional[int] = None
-    error: Optional[str] = None
+    output_url: str | None = None
+    filename: str | None = None
+    applied_edits: int | None = None
+    error: str | None = None
 
 
 class CaptionStylePresetResponse(BaseModel):
@@ -656,14 +693,14 @@ class CaptionStylePresetResponse(BaseModel):
     font_family: str
     font_scale: float
     text_colour: str
-    highlight_colour: Optional[str] = None
+    highlight_colour: str | None = None
     outline_colour: str
     outline_scale: float
     shadow_scale: float
     margin_v_scale: float
     word_colours: list[str] = Field(default_factory=list)
     uppercase: bool
-    pop_scale: Optional[int] = None
+    pop_scale: int | None = None
     max_words_per_line: int
 
 
@@ -681,7 +718,7 @@ class EditingPlanSaveRequest(BaseModel):
     options: dict[str, Any] = Field(
         default_factory=dict, description="Options used to generate the plan"
     )
-    media_asset_id: Optional[str] = None
+    media_asset_id: str | None = None
 
 
 class EditingPlanRecordResponse(BaseModel):
@@ -689,7 +726,7 @@ class EditingPlanRecordResponse(BaseModel):
 
     id: str
     project_id: str
-    media_asset_id: Optional[str] = None
+    media_asset_id: str | None = None
     plan: list[Any] = Field(default_factory=list)
     options: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -702,10 +739,10 @@ class StockFootageCreate(BaseModel):
     filename: str
     path: str
     source: str = "pexels"
-    query: Optional[str] = None
-    provider_id: Optional[str] = None
-    duration: Optional[float] = None
-    size: Optional[int] = None
+    query: str | None = None
+    provider_id: str | None = None
+    duration: float | None = None
+    size: int | None = None
 
 
 class StockFootageRecordResponse(BaseModel):
@@ -716,10 +753,10 @@ class StockFootageRecordResponse(BaseModel):
     filename: str
     path: str
     source: str
-    query: Optional[str] = None
-    provider_id: Optional[str] = None
-    duration: Optional[float] = None
-    size: Optional[int] = None
+    query: str | None = None
+    provider_id: str | None = None
+    duration: float | None = None
+    size: int | None = None
     created_at: datetime
 
 
@@ -732,11 +769,11 @@ class StockFootageListResponse(BaseModel):
 class MissingMediaResponse(BaseModel):
     """A referenced file that could not be resolved when importing a project."""
 
-    file_id: Optional[str] = None
+    file_id: str | None = None
     filename: str
     kind: str
-    expected_abs: Optional[str] = None
-    expected_rel: Optional[str] = None
+    expected_abs: str | None = None
+    expected_rel: str | None = None
 
 
 class ProjectImportResponse(BaseModel):
@@ -768,10 +805,10 @@ class CaptionJobStatusResponse(BaseModel):
 
     job_id: str
     status: str = Field(..., description="Job status (pending|running|done|error)")
-    output_url: Optional[str] = Field(
+    output_url: str | None = Field(
         None, description="URL of the cleaned video when status is 'done'"
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         None, description="Failure detail when status is 'error'"
     )
 
@@ -808,10 +845,10 @@ class DeathDetectStatusResponse(BaseModel):
         default_factory=list,
         description="K/D/A markers for the play bar, in source seconds",
     )
-    player_slot: Optional[int] = Field(
+    player_slot: int | None = Field(
         None, description="0-based top-bar slot used for detection"
     )
-    confidence: Optional[float] = Field(
+    confidence: float | None = Field(
         None,
         description="Auto-identification confidence in [0, 1] (null if overridden)",
     )
@@ -827,7 +864,7 @@ class DeathDetectStatusResponse(BaseModel):
         DEFAULT_OCR_ENGINE,
         description="OCR engine the K/D/A pass read with",
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         None, description="Failure detail when status is 'error'"
     )
 
@@ -883,12 +920,12 @@ class HighlightClipStatusResponse(BaseModel):
 
     job_id: str
     status: str = Field(..., description="pending, running, done, or error")
-    filename: Optional[str] = None
-    output_url: Optional[str] = Field(
+    filename: str | None = None
+    output_url: str | None = Field(
         None, description="Clip URL once status is 'done'"
     )
     duration: float = Field(0.0, description="Clip length in seconds")
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class SlotPreviewResponse(BaseModel):
@@ -907,10 +944,10 @@ class YouTubeDownloadRequest(BaseModel):
     """Request model for importing a video from YouTube."""
 
     url: str = Field(..., description="YouTube video URL")
-    project_id: Optional[str] = Field(
+    project_id: str | None = Field(
         None, description="Existing project to attach the imported video to"
     )
-    project_name: Optional[str] = Field(
+    project_name: str | None = Field(
         None, description="Name for a new project (defaults to the video title)"
     )
 
@@ -932,16 +969,16 @@ class YouTubeDownloadStatusResponse(BaseModel):
     job_id: str
     status: str = Field(..., description="Job status (pending|running|done|error)")
     progress: float = Field(0.0, description="Download progress as a 0..1 fraction")
-    file_id: Optional[str] = Field(
+    file_id: str | None = Field(
         None, description="Uploaded file ID when status is 'done'"
     )
-    project_id: Optional[str] = Field(
+    project_id: str | None = Field(
         None, description="Owning project ID when status is 'done'"
     )
-    media_asset_id: Optional[str] = Field(
+    media_asset_id: str | None = Field(
         None, description="Stored media asset ID when status is 'done'"
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         None, description="Failure detail when status is 'error'"
     )
 
@@ -950,7 +987,7 @@ class GpuInfoResponse(BaseModel):
     """A single detected GPU."""
 
     name: str = Field(..., description="GPU model name")
-    memory_total_mb: Optional[int] = Field(
+    memory_total_mb: int | None = Field(
         None, description="Total GPU memory in MiB, if reported"
     )
 
@@ -962,7 +999,7 @@ class ToolCudaResponse(BaseModel):
     available: bool = Field(
         ..., description="Whether torch.cuda is available in the tool's venv"
     )
-    device_name: Optional[str] = Field(
+    device_name: str | None = Field(
         None, description="CUDA device name reported by the tool's venv"
     )
     detail: str = Field(..., description="Human-readable probe summary")
@@ -983,8 +1020,8 @@ class EditingPlanRequest(BaseModel):
     """Request model for file-id based editing plan generation."""
 
     model_size: str = Field("base", description="Whisper model size")
-    api_key: Optional[str] = Field(None, description="LLM provider API key")
-    api_base_url: Optional[str] = Field(
+    api_key: str | None = Field(None, description="LLM provider API key")
+    api_base_url: str | None = Field(
         None,
         description=(
             "OpenAI-compatible base URL for a custom LLM provider "
@@ -1001,8 +1038,8 @@ class DiagramSuggestRequest(BaseModel):
     """Request model for file-id based diagram suggestion."""
 
     model_size: str = Field("base", description="Whisper model size")
-    api_key: Optional[str] = Field(None, description="LLM provider API key")
-    api_base_url: Optional[str] = Field(
+    api_key: str | None = Field(None, description="LLM provider API key")
+    api_base_url: str | None = Field(
         None,
         description=(
             "OpenAI-compatible base URL for a custom LLM provider "
@@ -1036,8 +1073,8 @@ class ProjectChatRequest(BaseModel):
         default_factory=list,
         description="Recent editor activity lines shown in the chat (oldest first)",
     )
-    api_key: Optional[str] = Field(None, description="LLM provider API key")
-    api_base_url: Optional[str] = Field(
+    api_key: str | None = Field(None, description="LLM provider API key")
+    api_base_url: str | None = Field(
         None,
         description=(
             "OpenAI-compatible base URL for a custom LLM provider "
@@ -1511,9 +1548,9 @@ def ensure_project(session: Session, project_id: str) -> Project:
 @app.post("/api/video/upload", response_model=VideoUploadResponse)
 async def upload_video(
     video: UploadFile = File(..., description="Video file to upload"),
-    project_id: Optional[str] = Form(None, description="Existing project ID"),
-    project_name: Optional[str] = Form(None, description="Project name"),
-    project_type: Optional[str] = Form(
+    project_id: str | None = Form(None, description="Existing project ID"),
+    project_name: str | None = Form(None, description="Project name"),
+    project_type: str | None = Form(
         None, description="Project type: 'standard' or 'gaming'"
     ),
     session: Session = Depends(get_session),
@@ -1667,7 +1704,7 @@ async def get_audio_pauses(
     min_silence_duration: float = 1.0,
     silence_threshold: int = -40,
     seek_step: int = 10,
-    merge_gap: Optional[float] = 0.5,
+    merge_gap: float | None = 0.5,
     padding: float = 0.1,
 ):
     """Detect silence/pause ranges for a previously uploaded video."""
@@ -1728,6 +1765,23 @@ async def list_projects(session: Session = Depends(get_session)):
     projects = session.exec(select(Project).order_by(Project.updated_at.desc())).all()
     items: list[ProjectListItemResponse] = []
     for project in projects:
+        if project.project_type == RANKING_PROJECT_TYPE:
+            clip_count, missing = ranking_store.missing_source_count(
+                session, project.id
+            )
+            items.append(
+                ProjectListItemResponse(
+                    id=project.id,
+                    name=project.name,
+                    project_type=project.project_type,
+                    created_at=project.created_at,
+                    updated_at=project.updated_at,
+                    source_available=True,  # always openable, even when empty
+                    clip_count=clip_count,
+                    missing_sources=missing,
+                )
+            )
+            continue
         asset = session.exec(
             select(MediaAsset)
             .where(MediaAsset.project_id == project.id)
@@ -1774,6 +1828,11 @@ async def open_project(
     timeline all restore from there).
     """
     project = ensure_project(session, project_id)
+    if project.project_type == RANKING_PROJECT_TYPE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ranking projects open via /api/ranking/projects/{project_id}",
+        )
     asset = session.exec(
         select(MediaAsset)
         .where(MediaAsset.project_id == project_id)
@@ -1831,6 +1890,8 @@ async def delete_project(
     assets = session.exec(
         select(MediaAsset).where(MediaAsset.project_id == project_id)
     ).all()
+
+    ranking_store.delete_project_data(session, project_id)
 
     deleted_files: list[str] = []
     if delete_files:
@@ -2247,7 +2308,7 @@ def _run_render_job(job_id: str, project_id: str, bind: Any) -> None:
     try:
         with Session(bind) as session:
             _execute_render(job_id, project_id, session)
-    except Exception as e:  # noqa: BLE001 - record any failure for the poller
+    except Exception as e:
         logger.error("Render job %s failed: %s", job_id, e)
         update_render_job(job_id, status="error", error=str(e))
 
@@ -2268,7 +2329,7 @@ def _execute_render(job_id: str, project_id: str, session: Session) -> None:
         select(EditOperation)
         .where(
             EditOperation.project_id == project_id,
-            EditOperation.enabled == True,  # noqa: E712
+            EditOperation.enabled,
         )
         .order_by(EditOperation.start)
     ).all()
@@ -2753,7 +2814,7 @@ async def start_caption_removal(
     file_id: str,
     background_tasks: BackgroundTasks,
     mode: str = DEFAULT_MODE,
-    use_gpu: Optional[bool] = None,
+    use_gpu: bool | None = None,
 ):
     """Start a background job that removes burned-in captions from a video.
 
@@ -2847,7 +2908,7 @@ async def gaming_slot_preview(file_id: str, team: str = "radiant"):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001 - surface decode/HUD failures as 500
+    except Exception as e:
         logger.error("Slot preview failed for %s: %s", file_id, e)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2866,7 +2927,7 @@ async def start_death_detection(
     file_id: str,
     background_tasks: BackgroundTasks,
     team: str = "radiant",
-    player_slot: Optional[int] = None,
+    player_slot: int | None = None,
     detect_kda: bool = False,
     ocr_engine: str = DEFAULT_OCR_ENGINE,
 ):
@@ -2883,6 +2944,12 @@ async def start_death_detection(
     it (the app's manual selector). Poll
     ``/api/gaming/death-detect/status/{job_id}`` for the intervals and markers.
     """
+    if player_slot is not None and not 0 <= player_slot <= 4:
+        raise HTTPException(
+            status_code=400,
+            detail="Player slot must be between 0 and 4",
+        )
+
     if ocr_engine not in OCR_ENGINES:
         raise HTTPException(
             status_code=400,
@@ -2993,7 +3060,7 @@ async def create_highlight_clip(
         rows = session.exec(
             select(EditOperation).where(
                 EditOperation.project_id == asset.project_id,
-                EditOperation.enabled == True,  # noqa: E712
+                EditOperation.enabled,
             )
         ).all()
         for row in rows:
@@ -3532,11 +3599,11 @@ async def generate_editing_plan_endpoint(
     model_size: str = Form(
         "base", description="Whisper model size (tiny, base, small, medium, large)"
     ),
-    api_key: Optional[str] = Form(
+    api_key: str | None = Form(
         None,
         description="LLM API key (optional, uses API_KEY env var if not provided)",
     ),
-    api_base_url: Optional[str] = Form(
+    api_base_url: str | None = Form(
         None,
         description=(
             "OpenAI-compatible base URL for a custom LLM provider "

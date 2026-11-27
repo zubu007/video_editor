@@ -46,9 +46,7 @@ def fingerprint_matches(path: Path, expected: FileFingerprint) -> bool:
         return False
 
 
-def resolve_reference(
-    path_abs: str | None, path_rel: str | None
-) -> Path | None:
+def resolve_reference(path_abs: str | None, path_rel: str | None) -> Path | None:
     """Resolve a saved reference to an existing file on this machine.
 
     Tries the absolute path first, then the relative path against the current

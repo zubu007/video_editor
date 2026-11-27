@@ -15,9 +15,9 @@ import subprocess
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import imageio_ffmpeg
 
@@ -30,7 +30,7 @@ JobStatus = Literal["pending", "running", "done", "error"]
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -41,9 +41,9 @@ class HighlightJob:
     file_id: str
     status: JobStatus = "pending"
     duration: float = 0.0
-    filename: Optional[str] = None
-    output_url: Optional[str] = None
-    error: Optional[str] = None
+    filename: str | None = None
+    output_url: str | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -60,7 +60,7 @@ def create_job(file_id: str) -> HighlightJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[HighlightJob]:
+def get_job(job_id: str) -> HighlightJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)
@@ -161,7 +161,7 @@ def text_captions_for_clip(
     return captions
 
 
-def _ffmpeg_error_message(stderr: Optional[str]) -> str:
+def _ffmpeg_error_message(stderr: str | None) -> str:
     """Turn ffmpeg's stderr into a short, user-facing job error.
 
     The generic "failed" message hid the actual cause (most damagingly a full
@@ -214,8 +214,8 @@ def run_highlight_job(
     output_path: str,
     output_filename: str,
     square: bool = False,
-    captions_edits: Optional[list[dict]] = None,
-    text_caption_edits: Optional[list[dict]] = None,
+    captions_edits: list[dict] | None = None,
+    text_caption_edits: list[dict] | None = None,
 ) -> None:
     """Trim ``source[start:end]`` into ``output_path`` with ffmpeg.
 
@@ -332,6 +332,6 @@ def run_highlight_job(
     except subprocess.CalledProcessError as e:
         logger.error("Highlight job %s ffmpeg failed: %s", job_id, e.stderr)
         update_job(job_id, status="error", error=_ffmpeg_error_message(e.stderr))
-    except Exception as e:  # noqa: BLE001 - record any failure for the poller
+    except Exception as e:
         logger.error("Highlight job %s failed: %s", job_id, e)
         update_job(job_id, status="error", error=str(e))

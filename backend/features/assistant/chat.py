@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from backend.features.assistant.tools import (
     ToolContext,
@@ -81,9 +81,9 @@ class ProjectChatLLM:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         model: str = DEFAULT_MODEL,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         """Initializes the chat client.
 
@@ -100,7 +100,7 @@ class ProjectChatLLM:
         self,
         messages: list[dict],
         project_context: str,
-        tool_context: Optional[ToolContext] = None,
+        tool_context: ToolContext | None = None,
     ) -> ChatResult:
         """Runs the agent loop for one user message.
 
@@ -161,7 +161,7 @@ class ProjectChatLLM:
         result.reply = self._reply_text(message)
         return result
 
-    def _complete(self, conversation: list[dict], tools: Optional[list[dict]]):
+    def _complete(self, conversation: list[dict], tools: list[dict] | None):
         """One LLM round-trip; returns the response message object."""
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -205,7 +205,7 @@ class ProjectChatLLM:
         return tool_result
 
     @staticmethod
-    def _parse_arguments(raw: Optional[str]) -> dict[str, Any]:
+    def _parse_arguments(raw: str | None) -> dict[str, Any]:
         """Parse tool-call arguments, tolerating LLM encoding quirks.
 
         Models sometimes emit an empty string, JSON null, or a double-encoded
@@ -290,10 +290,10 @@ def build_project_context(
 def generate_chat_reply(
     messages: list[dict],
     project_context: str,
-    tool_context: Optional[ToolContext] = None,
-    api_key: Optional[str] = None,
+    tool_context: ToolContext | None = None,
+    api_key: str | None = None,
     model: str = DEFAULT_MODEL,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
 ) -> ChatResult:
     """Convenience wrapper mirroring the other feature modules' entry points.
 

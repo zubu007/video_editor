@@ -19,7 +19,7 @@ dependencies = [
     "pydub>=0.25.0",
     "numpy>=1.24.0",
     "sqlmodel>=0.0.22",
-    "opencv-python-headless>=4.8.0",
+    "opencv-python-headless>=4.8.0,<5",
     "yt-dlp>=2024.8.6",
     "manim>=0.18.0",
     "pytesseract>=0.3.10",
@@ -44,6 +44,17 @@ dev = [
     "black>=25.0.0",
     "pytest>=9.0.0",
     "ruff>=0.14.0",
+]
+
+[tool.ruff.lint]
+ignore = [
+    "B008",    # FastAPI Depends()/File()/Form() defaults
+    "BLE001",  # deliberate resilient catch-alls in jobs and optional features
+    "S110",    # best-effort cleanup
+    "SIM115",  # long-lived temp file handles
+    "TRY004",  # validation errors intentionally raise ValueError (mapped to 400)
+    "UP031",  # printf-style ffmpeg/progress strings
+    "PLW1510",  # subprocess return codes are checked explicitly
 ]
 
 [tool.pytest.ini_options]

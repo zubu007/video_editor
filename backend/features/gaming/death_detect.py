@@ -580,6 +580,7 @@ def _dead_state_runs(
     threshold: float,
     enter_samples: int,
     exit_samples: int,
+    stream_end: float | None = None,
 ) -> list[dict]:
     """Return persistent dead-state runs while bridging brief timer dropouts.
 
@@ -623,8 +624,12 @@ def _dead_state_runs(
             exit_start = None
 
     if dead and start_time is not None:
-        if exit_start is not None:
-            end_time = times[exit_start]
+        # Reaching EOF before ``exit_samples`` alive samples means the apparent
+        # exit is unconfirmed and may only be a timer-rendering dropout. Keep
+        # the dead interval through the final sample; a confirmed respawn or
+        # buyback has already taken the branch above and set ``dead`` false.
+        if stream_end is not None and stream_end > 0:
+            end_time = float(stream_end)
         else:
             step = times[1] - times[0] if len(times) > 1 else 1.0
             end_time = times[-1] + step
@@ -698,6 +703,111 @@ def _refine_dead_interval(
     return {"start": refined_start, "end": refined_end}
 
 
+def _respawn_window_samples(
+    video_path: str | Path,
+    start: float,
+    end: float,
+    *,
+    fps: float,
+    width: int,
+    layout: DotaHudLayout,
+    slot_center: int,
+) -> tuple[list[float], list[float]]:
+    """Decode one short HUD window and return timer-signal samples."""
+    times: list[float] = []
+    signal: list[float] = []
+    for timestamp, strip in _stream_top_strip_window(
+        video_path,
+        start,
+        end,
+        fps,
+        width,
+        layout.strip_height,
+    ):
+        times.append(timestamp)
+        signal.append(_respawn_signal(strip, slot_center, layout))
+    return times, signal
+
+
+def _refine_video_dead_interval(
+    video_path: str | Path,
+    coarse: dict,
+    *,
+    width: int,
+    layout: DotaHudLayout,
+    slot_center: int,
+    preserve_end: bool = False,
+) -> dict:
+    """Re-decode small windows around a coarse dead interval's boundaries."""
+    start_times, start_signal = _respawn_window_samples(
+        video_path,
+        coarse["start"] - _REFINE_WINDOW_SECONDS,
+        coarse["start"] + _REFINE_WINDOW_SECONDS,
+        fps=_REFINE_FPS,
+        width=width,
+        layout=layout,
+        slot_center=slot_center,
+    )
+    end_times: list[float] = []
+    end_signal: list[float] = []
+    if not preserve_end:
+        end_times, end_signal = _respawn_window_samples(
+            video_path,
+            coarse["end"] - _REFINE_WINDOW_SECONDS,
+            coarse["end"] + _REFINE_WINDOW_SECONDS,
+            fps=_REFINE_FPS,
+            width=width,
+            layout=layout,
+            slot_center=slot_center,
+        )
+    return _refine_dead_interval(
+        coarse,
+        start_times,
+        start_signal,
+        end_times,
+        end_signal,
+        threshold=_GOLD_FRACTION,
+        stable_samples=_REFINE_STABLE_SAMPLES,
+    )
+
+
+def _coarse_runs_with_refined_boundaries(
+    video_path: str | Path,
+    times: list[float],
+    signal: list[float],
+    *,
+    width: int,
+    layout: DotaHudLayout,
+    slot_center: int,
+    stream_end: float | None = None,
+) -> list[dict]:
+    """Build persistent coarse runs and refine every start/end transition."""
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=_GOLD_FRACTION,
+        enter_samples=_COARSE_ENTER_SAMPLES,
+        exit_samples=_COARSE_EXIT_SAMPLES,
+        stream_end=stream_end,
+    )
+    exit_confirmed = len(signal) >= _COARSE_EXIT_SAMPLES and all(
+        value <= _GOLD_FRACTION for value in signal[-_COARSE_EXIT_SAMPLES:]
+    )
+    refined: list[dict] = []
+    for index, run in enumerate(runs):
+        refined.append(
+            _refine_video_dead_interval(
+                video_path,
+                run,
+                width=width,
+                layout=layout,
+                slot_center=slot_center,
+                preserve_end=index == len(runs) - 1 and not exit_confirmed,
+            )
+        )
+    return refined
+
+
 def _death_event_times(deaths_series: list[int], times: list[float]) -> list[float]:
     """Timestamps where the deaths counter increments."""
     events = []
@@ -748,7 +858,7 @@ def _death_intervals_from_runs(
 
 def detect_death_intervals(
     video_path: str | Path,
-    fps: float = 1.0,
+    fps: float = _COARSE_FPS,
     team: str = "radiant",
     player_slot: int | None = None,
     use_ocr: bool = False,
@@ -765,8 +875,8 @@ def detect_death_intervals(
 
     Args:
         video_path: The gameplay recording (HUD visible).
-        fps: Sampling rate in frames per second (1.0 is ample; deaths last
-            several seconds).
+        fps: Coarse sampling rate in frames per second. Candidate boundaries
+            are automatically re-decoded at a higher frame rate.
         team: The player's team (``"radiant"`` or ``"dire"``).
         player_slot: 0-based top-bar slot of the player; auto-identified via
             :func:`identify_player_slot` when ``None``.
@@ -788,7 +898,7 @@ def detect_death_intervals(
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    width, height = _video_dimensions(video_path)
+    width, height, duration = _video_metadata(video_path)
     layout = (layout or DotaHudLayout()).scaled(width, height)
     centers = layout.team_centers(team)
 
@@ -819,9 +929,15 @@ def detect_death_intervals(
     if not times:
         return []
 
-    # Golden respawn-box runs are the dead windows; keep solid runs, drop noise.
-    runs = _signal_runs(times, respawn, _GOLD_FRACTION, _MIN_RESPAWN_SAMPLES)
-    intervals = [r for r in runs if r["end"] - r["start"] >= _MIN_DEATH_SECONDS]
+    intervals = _coarse_runs_with_refined_boundaries(
+        video_path,
+        times,
+        respawn,
+        width=width,
+        layout=layout,
+        slot_center=slot_center,
+        stream_end=duration,
+    )
 
     events = _death_event_times(deaths_series, times) if ocr_on else []
     for run in intervals:
@@ -837,7 +953,7 @@ def detect_death_intervals(
 
 def detect_gaming_markers(
     video_path: str | Path,
-    fps: float = 1.0,
+    fps: float = _COARSE_FPS,
     team: str = "radiant",
     player_slot: int | None = None,
     detect_kda: bool = True,
@@ -881,7 +997,7 @@ def detect_gaming_markers(
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    width, height = _video_dimensions(video_path)
+    width, height, duration = _video_metadata(video_path)
     layout = (layout or DotaHudLayout()).scaled(width, height)
     centers = layout.team_centers(team)
 
@@ -921,12 +1037,18 @@ def detect_gaming_markers(
             "kda_available": kda_on,
         }
 
-    # Golden respawn-box runs are the confirmed dead windows (and reliable ends);
-    # when OCR ran, the deaths-counter increments pin each window's true start.
-    runs = _signal_runs(times, respawn, _GOLD_FRACTION, _MIN_RESPAWN_SAMPLES)
-    runs = [r for r in runs if r["end"] - r["start"] >= _MIN_DEATH_SECONDS]
+    # The selected top portrait's timer is authoritative for both boundaries.
+    # OCR remains a separate source of K/D/A markers and never moves a cut.
+    intervals = _coarse_runs_with_refined_boundaries(
+        video_path,
+        times,
+        respawn,
+        width=width,
+        layout=layout,
+        slot_center=slot_center,
+        stream_end=duration,
+    )
     death_times = _death_event_times(deaths_series, times) if kda_on else []
-    intervals = _death_intervals_from_runs(runs, death_times)
     for run in intervals:
         run["duration"] = round(run["end"] - run["start"], 2)
         run["start"] = round(run["start"], 2)

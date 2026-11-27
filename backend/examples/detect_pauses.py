@@ -4,6 +4,7 @@ Example script for detecting audio pauses in video files.
 
 import argparse
 import json
+import sys
 
 from backend.features.audio_pause.detect import (
     detect_audio_pauses,
@@ -137,4 +138,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

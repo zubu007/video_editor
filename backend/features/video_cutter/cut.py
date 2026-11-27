@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import itertools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 import proglog
 from moviepy import (
@@ -38,7 +39,7 @@ class _RenderProgressLogger(proglog.ProgressBarLogger):
         super().__init__()
         self._on_progress = on_progress
 
-    def bars_callback(self, bar, attr, value, old_value=None) -> None:  # noqa: D401
+    def bars_callback(self, bar, attr, value, old_value=None) -> None:
         if bar not in _VIDEO_PROGRESS_BARS or attr != "index":
             return
         total = self.bars[bar].get("total")
@@ -275,7 +276,7 @@ def _segment_spans(
 
     points = sorted(boundaries)
     spans: list[tuple[float, float, float | None, str | None, dict | None]] = []
-    for span_start, span_end in zip(points, points[1:]):
+    for span_start, span_end in itertools.pairwise(points):
         if span_end <= span_start:
             continue
         midpoint = (span_start + span_end) / 2.0
@@ -302,7 +303,7 @@ def render_with_edits(
     output_path: str,
     stock_footage_ranges: list | None = None,
     diagram_ranges: list | None = None,
-    on_progress: Optional[ProgressCallback] = None,
+    on_progress: ProgressCallback | None = None,
 ) -> None:
     """Render a video by removing cuts and applying zoom/B-roll/diagram effects.
 
@@ -403,7 +404,7 @@ def _write_concatenated(
     video: VideoFileClip,
     clips: list,
     output_path: str,
-    on_progress: Optional[ProgressCallback] = None,
+    on_progress: ProgressCallback | None = None,
 ) -> None:
     """Concatenate ``clips`` and write the result (empty video when none).
 
@@ -433,7 +434,7 @@ def render_timeline(
     zoom_ranges: list | None = None,
     stock_footage_ranges: list | None = None,
     diagram_ranges: list | None = None,
-    on_progress: Optional[ProgressCallback] = None,
+    on_progress: ProgressCallback | None = None,
 ) -> None:
     """Render ordered timeline segments, composing source-time edits.
 

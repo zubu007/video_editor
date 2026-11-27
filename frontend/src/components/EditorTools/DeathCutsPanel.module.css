@@ -148,6 +148,11 @@
   font-weight: 700;
 }
 
+.slotCard.slotSuggested {
+  border-style: dashed;
+  border-color: var(--primary);
+}
+
 .results {
   display: flex;
   flex-direction: column;

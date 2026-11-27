@@ -31,7 +31,7 @@ class TestPlanReel(unittest.TestCase):
     def test_minimap_sits_flush_in_the_bottom_left_corner(self):
         for width, height in ((1920, 1080), (2560, 1440), (1280, 720)):
             placement = plan_reel(width, height)
-            x, y, w, h = placement.minimap_dst
+            x, y, _w, h = placement.minimap_dst
             self.assertEqual(x, 0, "no left padding")
             self.assertEqual(y + h, placement.side, "no bottom padding")
 

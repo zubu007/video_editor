@@ -14,8 +14,8 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 from backend.features.gaming.death_detect import detect_gaming_markers
 from backend.features.gaming.ocr import DEFAULT_OCR_ENGINE
@@ -26,7 +26,7 @@ JobStatus = Literal["pending", "running", "done", "error"]
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -38,15 +38,15 @@ class DeathDetectJob:
     status: JobStatus = "pending"
     intervals: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
-    player_slot: Optional[int] = None
-    confidence: Optional[float] = None
+    player_slot: int | None = None
+    confidence: float | None = None
     # Whether the K/A OCR pass actually ran (the selected engine was available).
     # When False, only death ("D") markers are produced even if K/D/A was
     # requested.
     kda_available: bool = False
     # The OCR engine the K/D/A pass read with (see gaming.ocr).
     ocr_engine: str = DEFAULT_OCR_ENGINE
-    error: Optional[str] = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -63,7 +63,7 @@ def create_job(file_id: str) -> DeathDetectJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[DeathDetectJob]:
+def get_job(job_id: str) -> DeathDetectJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)
@@ -84,7 +84,7 @@ def run_death_detect_job(
     job_id: str,
     video_path: str,
     team: str = "radiant",
-    player_slot: Optional[int] = None,
+    player_slot: int | None = None,
     detect_kda: bool = True,
     ocr_engine: str = DEFAULT_OCR_ENGINE,
 ) -> None:
@@ -122,6 +122,6 @@ def run_death_detect_job(
             len(result["intervals"]),
             len(result["events"]),
         )
-    except Exception as e:  # noqa: BLE001 - record any failure for the poller
+    except Exception as e:
         logger.error("Death detection job %s failed: %s", job_id, e)
         update_job(job_id, status="error", error=str(e))

@@ -17,7 +17,9 @@ import HighlightsPanel from './components/EditorTools/HighlightsPanel';
 import ChatPanel from './components/Assistant/ChatPanel';
 import InspectorPanel from './components/Inspector/InspectorPanel';
 import SettingsModal from './components/Settings/SettingsModal';
+import RankingShorts from './components/RankingShorts/RankingShorts';
 import useSettings from './hooks/useSettings';
+import { buildDeathCutEdits } from './utils/deathCuts';
 import { formatTime } from './utils/timeFormat';
 import {
   uploadVideo,
@@ -49,6 +51,7 @@ import {
   startHighlightClip,
   getHighlightClipStatus,
   listProjects,
+  createRankingProject,
   openProject,
   deleteProject,
   apiErrorMessage,
@@ -157,9 +160,8 @@ function App() {
   const [deathSlots, setDeathSlots] = useState([]);
   const [deathSelectedSlot, setDeathSelectedSlot] = useState(null);
   const [deathCutsSaved, setDeathCutsSaved] = useState(0);
-  // Seconds of the death left visible before each cut starts, so the kill
-  // itself stays in the video instead of being sliced at the exact frame.
-  const [deathCutPadding, setDeathCutPadding] = useState('1.5');
+  // Optional seconds of the death left visible before each cut starts.
+  const [deathCutPadding, setDeathCutPadding] = useState('0');
   // K/D/A event markers for the play bar (gaming mode), placed by the dedicated
   // "Detect K/D/A markers" button.
   const [gamingEvents, setGamingEvents] = useState([]);
@@ -176,6 +178,7 @@ function App() {
   // Saved projects offered on the start screen ("Resume a project").
   const [savedProjects, setSavedProjects] = useState([]);
   const [savedProjectsError, setSavedProjectsError] = useState(null);
+  const [rankingProjectId, setRankingProjectId] = useState(null);
   const [resumingProjectId, setResumingProjectId] = useState(null);
   // Upload failures surfaced in the status strip (the upload used to fail
   // silently, leaving a video that plays but no tools that work).
@@ -569,8 +572,12 @@ function App() {
   // response, so the whole load path (waveform, saved edits, timeline) is
   // shared with a fresh upload — no re-uploading the source video.
   const handleResumeProject = async (project) => {
-    setResumingProjectId(project.id);
     setSavedProjectsError(null);
+    if (project.project_type === 'ranking') {
+      setRankingProjectId(project.id);
+      return;
+    }
+    setResumingProjectId(project.id);
     try {
       const response = await openProject(project.id);
       resetProjectStateForLoad();
@@ -586,6 +593,28 @@ function App() {
       );
     } finally {
       setResumingProjectId(null);
+    }
+  };
+
+  const handleCreateRankingProject = async () => {
+    setSavedProjectsError(null);
+    try {
+      const created = await createRankingProject();
+      setRankingProjectId(created.project.id);
+    } catch (error) {
+      setSavedProjectsError(
+        apiErrorMessage(error, 'Could not create the ranking short.')
+      );
+    }
+  };
+
+  const handleExitRanking = async () => {
+    setRankingProjectId(null);
+    try {
+      const data = await listProjects();
+      setSavedProjects(data.projects);
+    } catch {
+      /* the list refreshes on the next visit */
     }
   };
 
@@ -1783,9 +1812,14 @@ function App() {
     setDeathSelectedSlot(index);
   };
 
-  // Start detection (auto slot, or the manual override) and poll to completion.
+  // Start detection for the user-selected slot and poll to completion.
   const handleDetectDeaths = async () => {
     if (!fileId) return;
+    if (deathSelectedSlot == null) {
+      setDeathError('Select your hero in the top bar before detecting deaths.');
+      setDeathStatus('error');
+      return;
+    }
 
     stopDeathPolling();
     setDeathStatus('detecting');
@@ -1828,39 +1862,30 @@ function App() {
   };
 
   // Persist the detected dead intervals as cut edits on the project. Each cut
-  // starts `deathCutPadding` seconds after the detected death so the death
-  // moment itself stays in the video (clamped so short intervals can't invert).
+  // starts `deathCutPadding` seconds after the detected death. Intervals fully
+  // consumed by optional padding are skipped instead of sending invalid cuts.
   const handleAddDeathCuts = async () => {
     if (!projectId || deathIntervals.length === 0) return;
 
     const parsedPadding = parseFloat(deathCutPadding);
     const padding = Number.isNaN(parsedPadding) ? 0 : Math.max(0, parsedPadding);
+    const { edits: deathCutEdits, skipped } = buildDeathCutEdits(
+      deathIntervals,
+      padding,
+      mediaAssetId
+    );
+    if (deathCutEdits.length === 0) {
+      setDeathError('The padding consumes every detected death interval. Reduce it and try again.');
+      return;
+    }
+    setDeathError(null);
     try {
-      await createProjectEdits(
-        projectId,
-        deathIntervals.map((iv) => {
-          const start = Number(
-            Math.min(iv.start + padding, iv.end).toFixed(2)
-          );
-          return {
-            type: 'cut',
-            source: 'death_detection',
-            start,
-            end: iv.end,
-            enabled: true,
-            media_asset_id: mediaAssetId,
-            metadata: {
-              duration: Number((iv.end - start).toFixed(2)),
-              kind: 'death',
-              start_padding: padding,
-            },
-          };
-        })
-      );
+      await createProjectEdits(projectId, deathCutEdits);
       const edits = await getProjectEdits(projectId);
       applyLoadedEdits(edits.edits);
-      setDeathCutsSaved(deathIntervals.length);
-      logActivity(`Added ${deathIntervals.length} death cuts to the project.`);
+      setDeathCutsSaved(deathCutEdits.length);
+      const skippedMessage = skipped > 0 ? ` Skipped ${skipped} shorter than the padding.` : '';
+      logActivity(`Added ${deathCutEdits.length} death cuts to the project.${skippedMessage}`);
     } catch (error) {
       console.error('Error saving death cuts:', error);
       setDeathError('Could not add death cuts to the project.');
@@ -2092,6 +2117,17 @@ function App() {
                   <strong>Edit a gaming video</strong>
                   <span>Upload a Dota 2 recording and auto-cut death time</span>
                 </button>
+                <button
+                  type="button"
+                  className="source-card"
+                  onClick={handleCreateRankingProject}
+                >
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M5 3h14v2h-3v3h3v2h-3v3h3v2h-3v3h3v2H5v-2h3v-3H5v-2h3v-3H5v-2h3V5H5V3z" />
+                  </svg>
+                  <strong>Create a ranking short</strong>
+                  <span>Rank 2–10 clips in a vertical countdown video</span>
+                </button>
               </div>
 
               {savedProjectsError && (
@@ -2113,9 +2149,18 @@ function App() {
                             {project.project_type === 'gaming' && (
                               <span className="saved-project-badge">Gaming</span>
                             )}
+                            {project.project_type === 'ranking' && (
+                              <span className="saved-project-badge">Ranking</span>
+                            )}
                           </strong>
                           <span>
-                            {project.filename || 'No video uploaded'}
+                            {project.project_type === 'ranking'
+                              ? `${project.clip_count ?? 0} clips${
+                                  project.missing_sources
+                                    ? ` · ${project.missing_sources} missing video`
+                                    : ''
+                                }`
+                              : project.filename || 'No video uploaded'}
                             {project.duration != null &&
                               ` · ${formatTime(project.duration)}`}
                             {` · ${project.edit_count} edit${
@@ -2658,6 +2703,16 @@ function App() {
       </section>
     </main>
   );
+
+  if (rankingProjectId) {
+    return (
+      <RankingShorts
+        key={rankingProjectId}
+        projectId={rankingProjectId}
+        onExit={handleExitRanking}
+      />
+    );
+  }
 
   return (
     <div className={`app ${theme === 'dark' ? 'dark' : 'light'}`}>

@@ -23,12 +23,11 @@ Environment:
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 
-def create_chat_client(api_key: Optional[str] = None, base_url: Optional[str] = None):
+def create_chat_client(api_key: str | None = None, base_url: str | None = None):
     """Build a chat-completions client for the configured LLM provider.
 
     Args:

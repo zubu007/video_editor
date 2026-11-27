@@ -18,15 +18,15 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 JobStatus = Literal["pending", "running", "done", "error"]
 
 
 def _utc_now() -> datetime:
     """Return the current UTC datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -37,10 +37,10 @@ class RenderJob:
     project_id: str
     status: JobStatus = "pending"
     progress: float = 0.0
-    output_url: Optional[str] = None
-    filename: Optional[str] = None
-    applied_edits: Optional[int] = None
-    error: Optional[str] = None
+    output_url: str | None = None
+    filename: str | None = None
+    applied_edits: int | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -57,7 +57,7 @@ def create_job(project_id: str) -> RenderJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[RenderJob]:
+def get_job(job_id: str) -> RenderJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)

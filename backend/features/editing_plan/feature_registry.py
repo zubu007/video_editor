@@ -121,7 +121,7 @@ def get_feature_descriptions_for_llm() -> str:
         str: Formatted description of all available features.
     """
     descriptions = []
-    for feature_id, feature in AVAILABLE_FEATURES.items():
+    for feature in AVAILABLE_FEATURES.values():
         desc = f"- {feature['name']}: {feature['description']}\n  Use case: {feature['use_case']}"
         if feature["parameters"]:
             params = []

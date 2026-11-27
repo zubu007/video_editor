@@ -1,5 +1,27 @@
 # Video Editor - Quick Start Guide
 
+## Windows Dota 2 setup
+
+Install Git for Windows, uv, and Node.js 20.19+ (20.x) or 22.12+, then run from
+PowerShell:
+
+```powershell
+git clone https://github.com/zubu007/video_editor.git
+cd video_editor
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts/start-windows.ps1
+```
+
+Open <http://127.0.0.1:5173>, choose **Edit a gaming video**, and upload the full
+gameplay recording. In **Deaths**, choose the team, load the hero portraits,
+select your hero, and run **Detect deaths**. Review the intervals, select **Add
+cuts**, then use **Render / Export** to create and download the edited MP4.
+
+Death cutting needs no API keys and no OCR installation. The detector reads the
+golden respawn timer under the selected top-bar hero and ends each cut on normal
+respawn, buyback, or Aegis return. It requires a visible standard Dota HUD and
+the correct team and hero selection.
+
 ## Phase 1 Complete! ✅
 
 You now have a fully functional web-based video player with upload capabilities.
@@ -136,8 +158,7 @@ Visit `http://localhost:8000/docs` for interactive API documentation.
 ### Frontend won't start
 ```bash
 cd frontend
-rm -rf node_modules package-lock.json
-npm install
+npm ci
 npm run dev
 ```
 

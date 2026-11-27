@@ -7,7 +7,6 @@ a specified duration threshold.
 
 import os
 import tempfile
-from typing import List, Optional
 
 from pydub import AudioSegment
 from pydub.silence import detect_silence
@@ -20,7 +19,7 @@ def detect_audio_pauses(
     min_silence_duration: float = 1.0,
     silence_threshold: int = -40,
     seek_step: int = 1,
-) -> List[dict]:
+) -> list[dict]:
     """
     Detects audio pauses/silence in a video file.
 
@@ -102,7 +101,7 @@ def detect_audio_pauses_from_wav(
     min_silence_duration: float = 1.0,
     silence_threshold: int = -40,
     seek_step: int = 1,
-) -> List[dict]:
+) -> list[dict]:
     """
     Detects audio pauses/silence from a WAV file.
 
@@ -147,10 +146,10 @@ def detect_audio_pauses_from_wav(
 
 
 def filter_pauses_by_duration(
-    pauses: List[dict],
-    min_duration: Optional[float] = None,
-    max_duration: Optional[float] = None,
-) -> List[dict]:
+    pauses: list[dict],
+    min_duration: float | None = None,
+    max_duration: float | None = None,
+) -> list[dict]:
     """
     Filters pause segments by duration.
 
@@ -173,7 +172,7 @@ def filter_pauses_by_duration(
     return filtered
 
 
-def get_total_silence_duration(pauses: List[dict]) -> float:
+def get_total_silence_duration(pauses: list[dict]) -> float:
     """
     Calculates the total duration of all silence segments.
 
@@ -186,7 +185,7 @@ def get_total_silence_duration(pauses: List[dict]) -> float:
     return sum(p["duration"] for p in pauses)
 
 
-def apply_pause_padding(pauses: List[dict], padding: float = 0.1) -> List[dict]:
+def apply_pause_padding(pauses: list[dict], padding: float = 0.1) -> list[dict]:
     """
     Shrinks pause segments by a padding on both sides.
 
@@ -222,7 +221,7 @@ def apply_pause_padding(pauses: List[dict], padding: float = 0.1) -> List[dict]:
     return padded
 
 
-def merge_nearby_pauses(pauses: List[dict], max_gap: float = 0.5) -> List[dict]:
+def merge_nearby_pauses(pauses: list[dict], max_gap: float = 0.5) -> list[dict]:
     """
     Merges pause segments that are close together.
 

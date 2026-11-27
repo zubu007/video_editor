@@ -2,7 +2,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
@@ -807,5 +806,19 @@ def test_caption_styles_endpoint_lists_presets():
         assert body["default_style"] in names
         bold_pop = next(s for s in body["styles"] if s["name"] == "bold-pop")
         assert bold_pop["highlight_colour"] == "#FFD900"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_death_detection_rejects_invalid_player_slot():
+    client, _ = create_test_client()
+    try:
+        response = client.post(
+            "/api/gaming/detect-deaths/anything",
+            params={"player_slot": 5},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Player slot must be between 0 and 4"
     finally:
         app.dependency_overrides.clear()

@@ -22,10 +22,11 @@ from backend.features.project_io.schema import (
     StockRef,
 )
 from backend.storage.database import (
-    EditOperation,
     EditingPlan,
+    EditOperation,
     MediaAsset,
     Project,
+    RankingComposition,
     StockFootage,
 )
 
@@ -198,7 +199,7 @@ def load_project_file(
     """
     validate_document(doc)
 
-    project = Project(name=doc.project.name)
+    project = Project(name=doc.project.name, project_type=doc.project.project_type)
     session.add(project)
     result = ImportResult(project_id=project.id)
 
@@ -220,9 +221,7 @@ def load_project_file(
 
     for edit in doc.edits:
         asset = (
-            asset_by_old_file_id.get(edit.media_file_id)
-            if edit.media_file_id
-            else None
+            asset_by_old_file_id.get(edit.media_file_id) if edit.media_file_id else None
         )
         session.add(
             EditOperation(
@@ -252,5 +251,42 @@ def load_project_file(
             )
         )
 
+    if doc.ranking is not None:
+        _import_ranking(session, project.id, doc, asset_by_old_file_id)
+
     session.commit()
     return result
+
+
+def _import_ranking(
+    session: Session,
+    project_id: str,
+    doc: ProjectFile,
+    asset_by_old_file_id: dict[str, MediaAsset],
+) -> None:
+    """Restore the ranking composition, remapping every clip to its new asset."""
+    from backend.features.ranking.schema import RankingDocument
+
+    payload = dict(doc.ranking.document)  # type: ignore[union-attr]
+    clips = []
+    for clip in payload.get("clips", []):
+        clip = dict(clip)
+        asset = asset_by_old_file_id.get(clip.pop("media_file_id", None) or "")
+        clip["asset_id"] = asset.id if asset else None
+        if asset is None:
+            clip["media"] = None
+        clips.append(clip)
+    payload["clips"] = clips
+    payload["project_id"] = project_id
+    try:
+        ranking = RankingDocument.model_validate(payload)
+    except ValueError as exc:
+        raise ProjectFileError(f"Invalid ranking document: {exc}") from exc
+    session.add(
+        RankingComposition(
+            project_id=project_id,
+            schema_version=ranking.schema_version,
+            revision=ranking.revision,
+            document=ranking.model_dump(mode="json"),
+        )
+    )

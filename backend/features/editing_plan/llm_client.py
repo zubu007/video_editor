@@ -3,7 +3,6 @@ LLM client for generating editing decisions using the configured LLM provider.
 """
 
 import json
-from typing import Optional
 
 from backend.features.editing_plan.feature_registry import (
     get_feature_descriptions_for_llm,
@@ -19,9 +18,9 @@ class EditingPlanLLM:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         model: str = DEFAULT_MODEL,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         """
         Initializes the LLM client.
@@ -197,9 +196,7 @@ Generate an editing plan as a JSON array. Each element should specify the start 
                 continue
 
             # Ensure parameters is a dict
-            if "parameters" not in decision:
-                decision["parameters"] = {}
-            elif not isinstance(decision["parameters"], dict):
+            if "parameters" not in decision or not isinstance(decision["parameters"], dict):
                 decision["parameters"] = {}
 
             # Validate required parameters for specific features

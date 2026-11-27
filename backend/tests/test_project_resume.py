@@ -216,7 +216,7 @@ def test_upload_rejected_when_disk_is_low():
 
 
 def test_upload_persists_project_type(tmp_path):
-    client, engine = create_test_client()
+    client, _engine = create_test_client()
     stored: list[Path] = []
     try:
         from unittest.mock import patch

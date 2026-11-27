@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 class PexelsAPIError(Exception):
     """Exception raised for Pexels API errors."""
 
-    pass
 
 
 def _get_api_key() -> str:
@@ -113,8 +112,7 @@ def _download_video(video_url: str, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.writelines(response.iter_content(chunk_size=8192))
 
         logger.info(f"File downloaded successfully to {output_path}")
     except requests.exceptions.RequestException as e:
