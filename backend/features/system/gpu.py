@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from backend.features.caption_removal.remove import get_remover_python
 
@@ -64,7 +64,7 @@ class ToolCudaDetection(TypedDict):
 
     checked: bool
     available: bool
-    device_name: Optional[str]
+    device_name: str | None
     detail: str
 
 

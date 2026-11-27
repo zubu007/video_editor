@@ -84,15 +84,14 @@ def _load_spec() -> dict:
 # config wins over CLI flags because Manim imports this file after digesting
 # them. Guarded by the env var so importing this module for unit tests (no
 # spec) stays side-effect free.
-if os.environ.get("DIAGRAM_SPEC_PATH"):
-    if _load_spec().get("layout") == "portrait":
-        config.pixel_width, config.pixel_height = (
-            min(config.pixel_width, config.pixel_height),
-            max(config.pixel_width, config.pixel_height),
-        )
-        config.frame_width = (
-            config.frame_height * config.pixel_width / config.pixel_height
-        )
+if os.environ.get("DIAGRAM_SPEC_PATH") and _load_spec().get("layout") == "portrait":
+    config.pixel_width, config.pixel_height = (
+        min(config.pixel_width, config.pixel_height),
+        max(config.pixel_width, config.pixel_height),
+    )
+    config.frame_width = (
+        config.frame_height * config.pixel_width / config.pixel_height
+    )
 
 
 def _grid_positions(

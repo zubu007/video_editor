@@ -1,6 +1,6 @@
-import unittest
 import os
 import tempfile
+import unittest
 import wave
 
 import numpy as np
@@ -28,7 +28,7 @@ class TestAudioPauseDetection(unittest.TestCase):
             shutil.rmtree(self.test_dir)
 
     def create_test_wav_with_silence(
-        self, duration_seconds: float = 10.0, silence_segments: list = None
+        self, duration_seconds: float = 10.0, silence_segments: list | None = None
     ) -> str:
         """
         Creates a test WAV file with specified silence segments.

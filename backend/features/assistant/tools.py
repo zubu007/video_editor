@@ -10,9 +10,10 @@ feeds back to the model instead of aborting the conversation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from sqlmodel import Session, select
 
@@ -48,8 +49,8 @@ class ToolContext:
 
     session: Session
     project: Project
-    media_asset: Optional[MediaAsset] = None
-    video_path: Optional[Path] = None
+    media_asset: MediaAsset | None = None
+    video_path: Path | None = None
 
 
 @dataclass
@@ -73,7 +74,7 @@ class ToolSpec:
     mutates: bool = False
 
 
-def _duration_limit(context: ToolContext) -> Optional[float]:
+def _duration_limit(context: ToolContext) -> float | None:
     """Source video duration when known, for range validation."""
     if context.media_asset is not None and context.media_asset.duration:
         return context.media_asset.duration

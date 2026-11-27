@@ -2,33 +2,36 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
 from sqlmodel import Session, select
 
 from backend.features.project_io.paths import fingerprint_file, relative_to_cwd
 from backend.features.project_io.schema import (
+    BASE_FILE_VERSION,
+    PROJECT_FILE_VERSION,
     EditRef,
     MediaRef,
     PlanRef,
     ProjectFile,
     ProjectMeta,
+    RankingRef,
     StockRef,
 )
 from backend.storage.database import (
     EditOperation,
     MediaAsset,
     Project,
+    RankingComposition,
     get_latest_editing_plan,
     get_stock_footage,
     utc_now,
 )
 
-
 # A callable that maps a file_id to its on-disk path (or None if unresolved).
 # Injected so this module need not know the app's upload-dir lookup rules.
-MediaPathResolver = Callable[[str], Optional[Path]]
+MediaPathResolver = Callable[[str], Path | None]
 
 
 def _media_ref(asset: MediaAsset, resolve: MediaPathResolver) -> MediaRef:
@@ -122,12 +125,29 @@ def build_project_file(
             media_file_id=file_id_by_asset_id.get(saved_plan.media_asset_id),
         )
 
+    ranking_ref = None
+    composition = session.exec(
+        select(RankingComposition).where(RankingComposition.project_id == project_id)
+    ).first()
+    if composition is not None:
+        document = dict(composition.document)
+        clips = []
+        for clip in document.get("clips", []):
+            clip = dict(clip)
+            clip["media_file_id"] = file_id_by_asset_id.get(clip.pop("asset_id", None))
+            clips.append(clip)
+        document["clips"] = clips
+        ranking_ref = RankingRef(document=document)
+
     return ProjectFile(
+        version=PROJECT_FILE_VERSION if ranking_ref else BASE_FILE_VERSION,
+        ranking=ranking_ref,
         saved_at=utc_now(),
         source_project_id=project.id,
         project=ProjectMeta(
             id=project.id,
             name=project.name,
+            project_type=project.project_type,
             created_at=project.created_at,
             updated_at=project.updated_at,
         ),

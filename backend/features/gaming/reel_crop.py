@@ -185,10 +185,10 @@ def build_reel_filter(placement: ReelPlacement) -> str:
         [
             "[0:v]split=3[reel_base][reel_mm][reel_kda]",
             f"[reel_base]crop={side}:{side}:{placement.crop_x}:0[reel_sq]",
-            f"[reel_mm]crop={mw}:{mh}:{mx}:{my},"
-            f"scale={mdw}:{mdh}:flags=lanczos[reel_mm_s]",
-            f"[reel_kda]crop={kw}:{kh}:{kx}:{ky},"
-            f"scale={kdw}:{kdh}:flags=lanczos[reel_kda_s]",
+            (f"[reel_mm]crop={mw}:{mh}:{mx}:{my},"
+            f"scale={mdw}:{mdh}:flags=lanczos[reel_mm_s]"),
+            (f"[reel_kda]crop={kw}:{kh}:{kx}:{ky},"
+            f"scale={kdw}:{kdh}:flags=lanczos[reel_kda_s]"),
             f"[reel_sq][reel_mm_s]overlay={mdx}:{mdy}[reel_o1]",
             f"[reel_o1][reel_kda_s]overlay={kdx}:{kdy}[{REEL_OUTPUT_LABEL}]",
         ]

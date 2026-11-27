@@ -23,7 +23,7 @@ import logging
 import os
 import shutil
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -78,7 +78,7 @@ def _tesseract_available() -> tuple[bool, str]:
     """
     try:
         import pytesseract
-    except Exception:  # noqa: BLE001 - missing package disables the engine
+    except Exception:
         return False, "pytesseract is not installed"
 
     cmd = shutil.which("tesseract")
@@ -97,14 +97,14 @@ def _tesseract_available() -> tuple[bool, str]:
     try:
         pytesseract.get_tesseract_version()
         return True, "ready"
-    except Exception:  # noqa: BLE001 - any binary failure disables the engine
+    except Exception:
         return False, "the tesseract binary was not found on the server"
 
 
 def _paddleocr_available() -> tuple[bool, str]:
     try:
         import paddleocr  # noqa: F401
-    except Exception:  # noqa: BLE001 - missing/broken install disables the engine
+    except Exception:
         return False, "paddleocr is not installed"
     return True, "ready"
 
@@ -112,7 +112,7 @@ def _paddleocr_available() -> tuple[bool, str]:
 def _easyocr_available() -> tuple[bool, str]:
     try:
         import easyocr  # noqa: F401
-    except Exception:  # noqa: BLE001 - missing/broken install disables the engine
+    except Exception:
         return False, "easyocr is not installed"
     return True, "ready"
 
@@ -272,6 +272,6 @@ def read_digits(engine: str, bw: np.ndarray) -> str:
         )
     try:
         return func(bw)
-    except Exception as e:  # noqa: BLE001 - a bad read must not kill the scan
+    except Exception as e:
         logger.warning("OCR read failed (engine=%s): %s", engine, e)
         return ""

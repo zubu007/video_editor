@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-
 from backend.features.captions.ass_builder import _ass_time
 from backend.features.captions.text_caption import (
-    build_text_caption_ass,
     _reveal_events,
+    build_text_caption_ass,
 )
 
 PLAY_RES = (1920, 1080)

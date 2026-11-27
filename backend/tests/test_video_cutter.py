@@ -1,7 +1,10 @@
+import itertools
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from moviepy import VideoFileClip, concatenate_videoclips
 
 from backend.features.video_cutter.cut import (
     _RenderProgressLogger,
@@ -9,7 +12,6 @@ from backend.features.video_cutter.cut import (
     render_timeline,
     render_with_edits,
 )
-from moviepy import VideoFileClip, concatenate_videoclips
 
 
 class TestVideoCutter(unittest.TestCase):
@@ -229,7 +231,7 @@ class TestVideoCutter(unittest.TestCase):
         self.assertTrue(seen, "expected the encoder to report progress")
         self.assertTrue(all(0.0 <= value <= 1.0 for value in seen))
         self.assertTrue(
-            all(b >= a for a, b in zip(seen, seen[1:])),
+            all(b >= a for a, b in itertools.pairwise(seen)),
             "progress should climb monotonically",
         )
         self.assertAlmostEqual(seen[-1], 1.0, delta=0.05)

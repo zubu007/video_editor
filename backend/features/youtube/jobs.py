@@ -19,9 +19,9 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from sqlmodel import Session
 
@@ -41,7 +41,7 @@ JobStatus = Literal["pending", "running", "done", "error"]
 
 def _utc_now() -> datetime:
     """Return the current UTC datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -52,10 +52,10 @@ class DownloadJob:
     url: str
     status: JobStatus = "pending"
     progress: float = 0.0
-    file_id: Optional[str] = None
-    project_id: Optional[str] = None
-    media_asset_id: Optional[str] = None
-    error: Optional[str] = None
+    file_id: str | None = None
+    project_id: str | None = None
+    media_asset_id: str | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -72,7 +72,7 @@ def create_job(url: str) -> DownloadJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[DownloadJob]:
+def get_job(job_id: str) -> DownloadJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)
@@ -141,8 +141,8 @@ def run_download_job(
     file_id: str,
     output_dir: str,
     *,
-    project_id: Optional[str] = None,
-    project_name: Optional[str] = None,
+    project_id: str | None = None,
+    project_name: str | None = None,
 ) -> None:
     """Execute a YouTube download job, updating its status as it progresses.
 
@@ -160,7 +160,7 @@ def run_download_job(
             file_id,
             on_progress=lambda fraction: _update(job_id, progress=fraction),
         )
-    except Exception as exc:  # noqa: BLE001 - record any failure for the poller
+    except Exception as exc:
         logger.error("YouTube download job %s failed: %s", job_id, exc)
         _update(job_id, status="error", error=str(exc))
         return
@@ -174,7 +174,7 @@ def run_download_job(
             project_id=project_id,
             project_name=project_name,
         )
-    except Exception as exc:  # noqa: BLE001 - record any failure for the poller
+    except Exception as exc:
         logger.error("Persisting download job %s failed: %s", job_id, exc)
         # The media downloaded but could not be registered; clean up the orphan file.
         downloaded = result.get("path")

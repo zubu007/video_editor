@@ -4,6 +4,7 @@ This doesn't require a video file - it uses a pre-made transcript.
 """
 
 import os
+import sys
 
 from backend.features.editing_plan.generator import (
     generate_editing_plan,
@@ -117,4 +118,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

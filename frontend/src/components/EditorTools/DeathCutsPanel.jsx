@@ -19,7 +19,7 @@ export default function DeathCutsPanel({
   playerSlot,
   confidence,
   slots, // array of thumbnail data URLs (empty until loaded)
-  selectedSlot, // user's manual override, or null
+  selectedSlot, // user's explicit hero choice, or null
   onLoadSlots,
   onSelectSlot,
   onDetect,
@@ -31,7 +31,7 @@ export default function DeathCutsPanel({
 }) {
   const detecting = status === 'detecting';
   const loadingSlots = status === 'loading-slots';
-  const activeSlot = selectedSlot ?? playerSlot;
+  const canDetect = selectedSlot != null;
   const totalDead = intervals.reduce((sum, iv) => sum + iv.duration, 0);
 
   return (
@@ -73,24 +73,28 @@ export default function DeathCutsPanel({
               type="button"
               className={styles.primaryButton}
               onClick={onDetect}
-              disabled={detecting || loadingSlots}
+              disabled={detecting || loadingSlots || !canDetect}
             >
               {detecting
                 ? 'Scanning the match…'
-                : selectedSlot != null
+                : canDetect
                   ? `Detect deaths (slot ${selectedSlot + 1})`
-                  : 'Detect deaths'}
+                  : 'Select your hero to detect deaths'}
             </button>
-            <p className={styles.hint}>Takes a minute or two for a full match.</p>
+            <p className={styles.hint}>
+              {canDetect
+                ? 'Takes a minute or two for a full match.'
+                : 'Load the portraits below and click your hero first.'}
+            </p>
           </div>
 
-          {/* Manual slot selector — the backup when the auto match is wrong. */}
+          {/* Required hero selection; the auto match is only a suggestion. */}
           <div className={styles.slotSection}>
             <div className={styles.slotHead}>
               <strong>Your hero</strong>
               {playerSlot != null && (
                 <span className={styles.detected}>
-                  auto: slot {playerSlot + 1}
+                  suggested: slot {playerSlot + 1}
                   {confidence != null && ` (${Math.round(confidence * 100)}%)`}
                 </span>
               )}
@@ -102,12 +106,12 @@ export default function DeathCutsPanel({
                 onClick={onLoadSlots}
                 disabled={loadingSlots}
               >
-                {loadingSlots ? 'Loading portraits…' : 'Wrong hero? Pick it manually'}
+                {loadingSlots ? 'Loading portraits…' : 'Load hero portraits'}
               </button>
             ) : (
               <>
                 <p className={styles.hint}>
-                  Click your hero if the highlighted one is wrong.
+                  Click your hero in the top bar. The dashed one is only a suggestion.
                 </p>
                 <div className={styles.slotGrid}>
                   {slots.map((thumb, index) => (
@@ -115,7 +119,11 @@ export default function DeathCutsPanel({
                       key={index}
                       type="button"
                       className={`${styles.slotCard} ${
-                        index === activeSlot ? styles.slotActive : ''
+                        index === selectedSlot
+                          ? styles.slotActive
+                          : index === playerSlot
+                            ? styles.slotSuggested
+                            : ''
                       }`}
                       onClick={() => onSelectSlot(index)}
                       title={`Slot ${index + 1}`}
@@ -133,8 +141,8 @@ export default function DeathCutsPanel({
             <div className={styles.results}>
               {intervals.length === 0 ? (
                 <p className={styles.empty}>
-                  No deaths detected. If that looks wrong, pick your hero above and
-                  detect again.
+                  No deaths detected. If that looks wrong, check your hero
+                  selection above and detect again.
                 </p>
               ) : (
                 <>

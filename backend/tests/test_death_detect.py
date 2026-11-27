@@ -16,14 +16,18 @@ import pytest
 from backend.features.gaming.death_detect import (
     DotaHudLayout,
     _colour_signature,
+    _dead_state_runs,
     _death_event_times,
     _death_intervals_from_runs,
     _default_sample_times,
     _match_slot,
     _ocr_kda,
+    _refine_dead_interval,
     _respawn_signal,
     _signal_runs,
+    _stable_transition_time,
     detect_death_intervals,
+    detect_gaming_markers,
 )
 
 
@@ -129,6 +133,209 @@ def test_signal_runs_drops_too_short_runs():
     times = list(range(5))
     signal = [0, 0.2, 0, 0, 0]  # single sample, below min_samples
     assert _signal_runs(times, signal, threshold=0.05, min_samples=2) == []
+
+
+def test_dead_state_runs_bridges_single_timer_dropout():
+    """A one-sample missing timer must not split an ongoing death."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+    signal = [0.0, 0.08, 0.09, 0.0, 0.08, 0.0]
+
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=0.03,
+        enter_samples=1,
+        exit_samples=2,
+    )
+
+    # The final alive-looking sample is not enough to confirm an exit, so the
+    # interval remains dead through that last sample boundary.
+    assert runs == [{"start": 0.5, "end": 3.0}]
+
+
+def test_dead_state_runs_keeps_quick_buyback_interval():
+    """A stable dead state under five seconds is still a real death."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    signal = [0.0, 0.08, 0.09, 0.08, 0.0, 0.0, 0.0]
+
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=0.03,
+        enter_samples=2,
+        exit_samples=2,
+    )
+
+    assert runs == [{"start": 0.5, "end": 2.0}]
+
+
+def test_dead_state_runs_keeps_unconfirmed_eof_dropout_inside_death():
+    """One final missing-timer sample must not fake a respawn at EOF."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0]
+    signal = [0.0, 0.08, 0.09, 0.08, 0.0]
+
+    runs = _dead_state_runs(
+        times,
+        signal,
+        threshold=0.03,
+        enter_samples=2,
+        exit_samples=2,
+    )
+
+    assert runs == [{"start": 0.5, "end": 2.5}]
+
+
+def test_stable_transition_returns_first_frame_not_confirmation_frame():
+    times = [10.0, 10.1, 10.2, 10.3, 10.4]
+    signal = [0.08, 0.07, 0.0, 0.0, 0.0]
+
+    assert (
+        _stable_transition_time(
+            times,
+            signal,
+            target_dead=False,
+            threshold=0.03,
+            stable_samples=3,
+        )
+        == 10.2
+    )
+
+
+def test_refine_dead_interval_uses_precise_start_and_buyback_boundaries():
+    coarse = {"start": 100.0, "end": 104.0}
+    start_times = [99.8, 99.9, 100.0, 100.1, 100.2]
+    start_signal = [0.0, 0.0, 0.07, 0.08, 0.08]
+    end_times = [103.8, 103.9, 104.0, 104.1, 104.2]
+    end_signal = [0.08, 0.08, 0.0, 0.0, 0.0]
+
+    refined = _refine_dead_interval(
+        coarse,
+        start_times,
+        start_signal,
+        end_times,
+        end_signal,
+        threshold=0.03,
+        stable_samples=3,
+    )
+
+    assert refined == {"start": 100.0, "end": 104.0}
+
+
+def test_refine_dead_interval_falls_back_when_transition_is_unreadable():
+    coarse = {"start": 100.0, "end": 104.0}
+
+    refined = _refine_dead_interval(
+        coarse,
+        [99.8, 99.9, 100.0],
+        [0.0, 0.0, 0.0],
+        [103.8, 103.9, 104.0],
+        [0.08, 0.08, 0.08],
+        threshold=0.03,
+        stable_samples=2,
+    )
+
+    assert refined == coarse
+
+
+def test_gaming_pipeline_refines_and_keeps_quick_buyback(tmp_path, monkeypatch):
+    """The real pipeline must retain and refine a sub-five-second death."""
+    from backend.features.gaming import death_detect as detector
+
+    video = tmp_path / "match.mp4"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(detector, "_video_dimensions", lambda path: (1920, 1080))
+    monkeypatch.setattr(detector, "_video_metadata", lambda path: (1920, 1080, 2.6))
+    monkeypatch.setattr(
+        detector,
+        "_respawn_signal",
+        lambda strip, center, layout: float(strip[0, 0, 0]),
+    )
+
+    coarse = [
+        (0.0, 0),
+        (0.5, 80),
+        (1.0, 80),
+        (1.5, 80),
+        (2.0, 0),
+        (2.5, 0),
+    ]
+
+    def coarse_stream(*args, **kwargs):
+        for timestamp, value in coarse:
+            frame = np.zeros((2, 2, 3), np.uint8)
+            frame[0, 0, 0] = value
+            yield timestamp, frame
+
+    def window_stream(path, start, end, fps, width, strip_h):
+        timestamp = start
+        while timestamp < end:
+            frame = np.zeros((2, 2, 3), np.uint8)
+            frame[0, 0, 0] = 80 if 0.8 <= timestamp < 1.9 else 0
+            yield round(timestamp, 2), frame
+            timestamp = round(timestamp + 0.1, 2)
+
+    monkeypatch.setattr(detector, "_stream_top_strip", coarse_stream)
+    monkeypatch.setattr(detector, "_stream_top_strip_window", window_stream)
+
+    result = detect_gaming_markers(
+        video,
+        player_slot=0,
+        detect_kda=False,
+    )
+
+    assert result["intervals"] == [
+        {"start": 0.8, "end": 1.9, "duration": 1.1}
+    ]
+
+
+def test_gaming_pipeline_does_not_refine_eof_death_to_timer_dropout(
+    tmp_path, monkeypatch
+):
+    """An EOF-open death must ignore an earlier refined-window dropout."""
+    from backend.features.gaming import death_detect as detector
+
+    video = tmp_path / "match.mp4"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(detector, "_video_dimensions", lambda path: (1920, 1080))
+    monkeypatch.setattr(detector, "_video_metadata", lambda path: (1920, 1080, 6.2))
+    monkeypatch.setattr(
+        detector,
+        "_respawn_signal",
+        lambda strip, center, layout: float(strip[0, 0, 0]),
+    )
+
+    coarse = [(0.0, 0)] + [
+        (timestamp, 0 if timestamp == 5.0 else 80)
+        for timestamp in [x / 2 for x in range(1, 12)]
+    ]
+
+    def coarse_stream(*args, **kwargs):
+        for timestamp, value in coarse:
+            frame = np.zeros((2, 2, 3), np.uint8)
+            frame[0, 0, 0] = value
+            yield timestamp, frame
+
+    def window_stream(path, start, end, fps, width, strip_h):
+        timestamp = max(0.0, start)
+        while timestamp <= min(end, 6.2):
+            frame = np.zeros((2, 2, 3), np.uint8)
+            is_dropout = 5.0 <= timestamp < 5.3
+            frame[0, 0, 0] = 80 if timestamp >= 0.8 and not is_dropout else 0
+            yield round(timestamp, 2), frame
+            timestamp = round(timestamp + 0.1, 2)
+
+    monkeypatch.setattr(detector, "_stream_top_strip", coarse_stream)
+    monkeypatch.setattr(detector, "_stream_top_strip_window", window_stream)
+
+    result = detect_gaming_markers(
+        video,
+        player_slot=0,
+        detect_kda=False,
+    )
+
+    assert result["intervals"] == [
+        {"start": 0.8, "end": 6.2, "duration": 5.4}
+    ]
 
 
 def test_ocr_kda_rejects_dips_and_implausible_jumps(monkeypatch):

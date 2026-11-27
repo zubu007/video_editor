@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 DATA_DIR = Path("data")
@@ -19,7 +19,7 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
 def utc_now() -> datetime:
     """Return the current UTC datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Project(SQLModel, table=True):
@@ -98,6 +98,17 @@ class StockFootage(SQLModel, table=True):
     duration: float | None = None
     size: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class RankingComposition(SQLModel, table=True):
+    """The versioned composition document of a ``ranking`` project."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="project.id", index=True, unique=True)
+    schema_version: int = 1
+    revision: int = 1
+    document: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 def init_db() -> None:

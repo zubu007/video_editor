@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from faster_whisper import WhisperModel
 
@@ -93,7 +93,7 @@ def extract_transcript_as_sentences(video_path: str, model_size: str = "base") -
 def extract_transcript_as_words(
     video_path: str,
     model_size: str = "base",
-    on_progress: Optional[Callable[[float], None]] = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> list:
     """
     Extracts transcript from a video file as a list of words.

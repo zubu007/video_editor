@@ -4,13 +4,14 @@ Example script demonstrating how to use the editing plan generator.
 
 import argparse
 import os
+import sys
 
-from backend.features.transcript.extract import extract_transcript_as_sentences
 from backend.features.editing_plan.generator import (
     generate_editing_plan,
     print_editing_plan,
     save_editing_plan,
 )
+from backend.features.transcript.extract import extract_transcript_as_sentences
 
 
 def main():
@@ -84,4 +85,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

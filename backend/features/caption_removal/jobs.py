@@ -12,8 +12,8 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 from backend.features.caption_removal.remove import DEFAULT_MODE, remove_captions
 
@@ -24,7 +24,7 @@ JobStatus = Literal["pending", "running", "done", "error"]
 
 def _utc_now() -> datetime:
     """Return the current UTC datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -35,7 +35,7 @@ class CaptionJob:
     file_id: str
     output_filename: str
     status: JobStatus = "pending"
-    error: Optional[str] = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -56,13 +56,13 @@ def create_job(file_id: str, output_filename: str) -> CaptionJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[CaptionJob]:
+def get_job(job_id: str) -> CaptionJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)
 
 
-def _set_status(job_id: str, status: JobStatus, error: Optional[str] = None) -> None:
+def _set_status(job_id: str, status: JobStatus, error: str | None = None) -> None:
     """Update a job's status and timestamp."""
     with _LOCK:
         job = _JOBS.get(job_id)
@@ -90,6 +90,6 @@ def run_caption_removal_job(
     try:
         remove_captions(video_path, output_path, mode=mode, use_gpu=use_gpu)
         _set_status(job_id, "done")
-    except Exception as exc:  # noqa: BLE001 - record any failure for the poller
+    except Exception as exc:
         logger.error("Caption removal job %s failed: %s", job_id, exc)
         _set_status(job_id, "error", error=str(exc))

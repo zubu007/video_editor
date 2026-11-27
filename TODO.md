@@ -29,14 +29,16 @@ recording to calibrate CV thresholds before implementation.
    - ✅ **Dead signal = golden respawn-box** under the player's fixed slot: a
      gold-bordered countdown box present only while dead. Detect the fraction of
      gold-hue pixels (OpenCV H 12–32, S>110, V>140) in the box region; a
-     *continuous* run >5s = a death. Clean (median 0, ~0.077 during deaths).
-     Handles buyback/Aegis (box vanishes early). Do NOT merge runs across gaps —
-     a solid box never flickers, so gaps are noise, not one death.
+     *persistent* run = a death (brief dropouts are bridged). Clean (median 0,
+     ~0.077 during deaths). Buyback/Aegis are handled: the first stable timer
+     disappearance ends the cut. Detection is coarse-to-fine: a low-rate scan
+     finds candidates, then small windows around each boundary are re-decoded at
+     a higher rate to return the first frame of the stable transition (falling
+     back to the coarse boundary if unreadable).
    - ✅ **K/D/A deaths OCR** (top-left, tesseract) is a clean death-*event*
      signal over short spans but too noisy to anchor over a full match; kept as
      optional `use_ocr` confirmation tag only (default off, no tesseract needed).
-   - Ultra-short early respawns (~<5s, e.g. the sample's first death ~177s) are
-     intentionally skipped — not worth cutting.
+   - Short deaths (quick buybacks, <5s) are kept, not discarded.
    - Coordinates/thresholds live in `DotaHudLayout` (calibrated 1920×1080,
      `.scaled()` for other resolutions). Dire slot centres are calibrated too
      (measured from the sample footage's top bar via the player-colour strips;
@@ -64,10 +66,9 @@ recording to calibrate CV thresholds before implementation.
      thumbnails for the manual selector). Detected intervals are saved as `cut`
      EditOperations (`source="death_detection"`) via the existing edit endpoint,
      so render/timeline work for free.
-   - **Manual slot selector (backup):** the panel shows the 5 team portraits with
-     the auto-detected one highlighted; the user can click their hero to override
-     and re-detect with that `player_slot`. Handles the case where the colour
-     match is wrong or teamfight deaths confuse auto-ID.
+   - **Required slot selection:** the panel shows the 5 team portraits and
+     Detect stays disabled until the user clicks their hero; the auto-detected
+     slot is only a dashed suggestion. The route rejects `player_slot` outside 0–4.
 
    **Still open:**
    - Verify death detection on a real Dire-side recording (centres are

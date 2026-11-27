@@ -12,8 +12,9 @@ can surface a 400 rather than starting a doomed download.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import yt_dlp
 
@@ -78,7 +79,7 @@ def download_video(
     output_dir: Path,
     file_stem: str,
     *,
-    on_progress: Optional[ProgressCallback] = None,
+    on_progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Download a single YouTube video as ``{file_stem}.mp4`` under ``output_dir``.
 

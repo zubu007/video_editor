@@ -680,4 +680,75 @@ export async function deleteProject(projectId, deleteFiles = true) {
   return response.data;
 }
 
+// ---- Ranking Shorts ---------------------------------------------------------
+
+/** Create an empty ranking project (five blank slots). */
+export async function createRankingProject(name) {
+  const response = await apiClient.post('/api/ranking/projects', { name });
+  return response.data;
+}
+
+/** Fetch the composition, media availability, issues and jobs. */
+export async function getRankingProject(projectId) {
+  const response = await apiClient.get(`/api/ranking/projects/${projectId}`);
+  return response.data;
+}
+
+/** Save the composition against an expected revision (409 on conflict). */
+export async function saveRankingProject(projectId, revision, document, name) {
+  const response = await apiClient.put(`/api/ranking/projects/${projectId}`, {
+    revision,
+    document,
+    name,
+  });
+  return response.data;
+}
+
+export async function startRankingDownload(projectId, clipId, url) {
+  const response = await apiClient.post(
+    `/api/ranking/projects/${projectId}/clips/${clipId}/download`,
+    { url }
+  );
+  return response.data;
+}
+
+export async function uploadRankingClip(projectId, clipId, file) {
+  const form = new FormData();
+  form.append('video', file);
+  const response = await apiClient.post(
+    `/api/ranking/projects/${projectId}/clips/${clipId}/upload`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 0 }
+  );
+  return response.data;
+}
+
+export async function getRankingJob(jobId) {
+  const response = await apiClient.get(`/api/ranking/jobs/${jobId}`);
+  return response.data;
+}
+
+export async function cancelRankingJob(jobId) {
+  const response = await apiClient.post(`/api/ranking/jobs/${jobId}/cancel`);
+  return response.data;
+}
+
+/** Rasterise the heading/ranking overlay for a draft document as a PNG blob. */
+export async function fetchRankingOverlay(document, activeIndex) {
+  const response = await apiClient.post(
+    '/api/ranking/overlay',
+    { document, active_index: activeIndex },
+    { responseType: 'blob' }
+  );
+  return response.data;
+}
+
+export async function startRankingRender(projectId, revision, { preview = false } = {}) {
+  const response = await apiClient.post(
+    `/api/ranking/projects/${projectId}/${preview ? 'preview' : 'render'}`,
+    { revision }
+  );
+  return response.data;
+}
+
 export default apiClient;

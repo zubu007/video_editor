@@ -2,16 +2,16 @@ import unittest
 from unittest.mock import Mock, patch
 
 from backend.features.editing_plan.feature_registry import (
+    AVAILABLE_FEATURES,
     get_feature_descriptions_for_llm,
     validate_feature_name,
-    AVAILABLE_FEATURES,
 )
 from backend.features.editing_plan.generator import (
+    filter_editing_plan_by_feature,
     generate_editing_plan,
-    save_editing_plan,
     load_editing_plan,
     merge_editing_plans,
-    filter_editing_plan_by_feature,
+    save_editing_plan,
 )
 
 
@@ -19,7 +19,7 @@ class TestFeatureRegistry(unittest.TestCase):
 
     def test_available_features_structure(self):
         """Test that all features have required fields."""
-        for feature_id, feature in AVAILABLE_FEATURES.items():
+        for feature in AVAILABLE_FEATURES.values():
             self.assertIn("name", feature)
             self.assertIn("description", feature)
             self.assertIn("use_case", feature)
@@ -107,8 +107,8 @@ class TestEditingPlanGenerator(unittest.TestCase):
 
     def test_save_and_load_editing_plan(self):
         """Test saving and loading editing plans."""
-        import tempfile
         import os
+        import tempfile
 
         # Create a temporary file
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
@@ -157,10 +157,10 @@ class TestLLMClient(unittest.TestCase):
 
     def test_llm_client_requires_api_key(self):
         """Test that LLM client requires an API key."""
-        from backend.features.editing_plan.llm_client import EditingPlanLLM
-
         # Clear the environment variable if it exists
         import os
+
+        from backend.features.editing_plan.llm_client import EditingPlanLLM
 
         old_key = os.environ.pop("API_KEY", None)
 

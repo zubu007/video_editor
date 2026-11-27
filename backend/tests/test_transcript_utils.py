@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from backend.utils.transcript_utils import sentences_to_words, words_to_sentences
 
 

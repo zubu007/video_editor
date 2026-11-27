@@ -15,8 +15,8 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 from backend.features.transcript.extract import extract_transcript_as_words
 
@@ -26,7 +26,7 @@ JobStatus = Literal["pending", "running", "done", "error"]
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -39,7 +39,7 @@ class TranscriptJob:
     status: JobStatus = "pending"
     progress: float = 0.0
     words: list[dict] = field(default_factory=list)
-    error: Optional[str] = None
+    error: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
 
@@ -58,7 +58,7 @@ def create_job(file_id: str, model_size: str = "base") -> TranscriptJob:
     return job
 
 
-def get_job(job_id: str) -> Optional[TranscriptJob]:
+def get_job(job_id: str) -> TranscriptJob | None:
     """Return a job by ID, or ``None`` if unknown."""
     with _LOCK:
         return _JOBS.get(job_id)
@@ -97,6 +97,6 @@ def run_transcript_job(
         )
         update_job(job_id, status="done", progress=1.0, words=words)
         logger.info("Transcript job %s done: %d words", job_id, len(words))
-    except Exception as e:  # noqa: BLE001 - record any failure for the poller
+    except Exception as e:
         logger.error("Transcript job %s failed: %s", job_id, e)
         update_job(job_id, status="error", error=str(e))

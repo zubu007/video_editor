@@ -3,18 +3,17 @@ Main module for generating editing plans from transcripts.
 """
 
 import json
-from typing import Optional
 
 from backend.features.editing_plan.llm_client import DEFAULT_MODEL, EditingPlanLLM
 
 
 def generate_editing_plan(
     transcript: list,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     model: str = DEFAULT_MODEL,
     additional_context: str = "",
-    output_file: Optional[str] = None,
-    base_url: Optional[str] = None,
+    output_file: str | None = None,
+    base_url: str | None = None,
 ) -> list:
     """
     Generates an editing plan for a video based on its transcript.
