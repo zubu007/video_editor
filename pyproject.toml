@@ -24,6 +24,7 @@ dependencies = [
     "manim>=0.18.0",
     "pytesseract>=0.3.10",
     "openai>=1.40.0",
+    "mcp>=1.2.0,<2",
 ]
 
 # Alternative OCR engines for the gaming K/D/A pass (Settings → K/D/A
