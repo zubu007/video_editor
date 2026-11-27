@@ -289,3 +289,35 @@ class TestRenderProgressLogger(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_render_closes_every_clip_even_when_it_fails(monkeypatch, tmp_path):
+    import pytest
+
+    from backend.features.video_cutter import cut
+
+    closed: list[str] = []
+
+    class FakeClip:
+        duration = 10.0
+        fps = 24
+
+        def subclip(self, *args):
+            return self
+
+        subclipped = subclip
+
+        def close(self) -> None:
+            closed.append("source")
+
+    monkeypatch.setattr(cut, "VideoFileClip", lambda *a, **k: FakeClip())
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(cut, "_write_concatenated", boom)
+
+    with pytest.raises(RuntimeError):
+        cut.render_with_edits("x.mp4", [], [], str(tmp_path / "out.mp4"))
+
+    assert closed == ["source"]

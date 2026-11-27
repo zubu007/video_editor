@@ -808,9 +808,7 @@ class CaptionJobStatusResponse(BaseModel):
     output_url: str | None = Field(
         None, description="URL of the cleaned video when status is 'done'"
     )
-    error: str | None = Field(
-        None, description="Failure detail when status is 'error'"
-    )
+    error: str | None = Field(None, description="Failure detail when status is 'error'")
 
 
 class DeathDetectStartResponse(BaseModel):
@@ -864,9 +862,7 @@ class DeathDetectStatusResponse(BaseModel):
         DEFAULT_OCR_ENGINE,
         description="OCR engine the K/D/A pass read with",
     )
-    error: str | None = Field(
-        None, description="Failure detail when status is 'error'"
-    )
+    error: str | None = Field(None, description="Failure detail when status is 'error'")
 
 
 class OcrEngineInfo(BaseModel):
@@ -921,9 +917,7 @@ class HighlightClipStatusResponse(BaseModel):
     job_id: str
     status: str = Field(..., description="pending, running, done, or error")
     filename: str | None = None
-    output_url: str | None = Field(
-        None, description="Clip URL once status is 'done'"
-    )
+    output_url: str | None = Field(None, description="Clip URL once status is 'done'")
     duration: float = Field(0.0, description="Clip length in seconds")
     error: str | None = None
 
@@ -978,9 +972,7 @@ class YouTubeDownloadStatusResponse(BaseModel):
     media_asset_id: str | None = Field(
         None, description="Stored media asset ID when status is 'done'"
     )
-    error: str | None = Field(
-        None, description="Failure detail when status is 'error'"
-    )
+    error: str | None = Field(None, description="Failure detail when status is 'error'")
 
 
 class GpuInfoResponse(BaseModel):
@@ -2143,45 +2135,67 @@ def _burn_project_captions(
 ) -> None:
     """Burn word captions onto a rendered project video.
 
-    Words come from the first captions edit's saved ``details["words"]``
-    (falling back to transcribing the source), are filtered to the spans the
-    captions edits cover, and are remapped from source time onto the rendered
-    output's timeline before burning. The style also comes from the first
-    captions edit. When every captioned word was cut away, the rendered video
-    is kept as-is.
+    Each captions edit is burned in its own pass using its own saved
+    ``details["words"]`` (falling back to transcribing the source once), style
+    and line width. Words are filtered to that edit's span and remapped from
+    source time onto the rendered output's timeline. Edits whose words were all
+    cut away are skipped; if none burn, the rendered video is kept as-is.
     """
-    details = captions_edits[0].details or {}
-    words = details.get("words") or extract_transcript_as_words(
-        str(source_path), "base"
-    )
-
-    spans = [(edit.start, edit.end) for edit in captions_edits]
-    covered = [
-        word
-        for word in words
-        if any(
-            start <= (float(word["start"]) + float(word["end"])) / 2.0 < end
-            for start, end in spans
-        )
-    ]
-
     segments = [{"start": row.start, "end": row.end} for row in timeline_rows]
     intervals = output_intervals(
         video_duration(source_path), cut_ranges, segments or None
     )
-    remapped = remap_words(covered, intervals)
-    if not remapped:
+
+    transcribed: list | None = None
+    passes: list[tuple[dict, list]] = []
+    for edit in captions_edits:
+        details = edit.details or {}
+        words = details.get("words")
+        if not words:
+            if transcribed is None:
+                transcribed = extract_transcript_as_words(str(source_path), "base")
+            words = transcribed
+        covered = [
+            word
+            for word in words
+            if edit.start
+            <= (float(word["start"]) + float(word["end"])) / 2.0
+            < edit.end
+        ]
+        remapped = remap_words(covered, intervals)
+        if remapped:
+            passes.append((details, remapped))
+
+    if not passes:
         logger.warning("All captioned words were cut; rendering without captions")
         rendered_path.replace(output_path)
         return
 
-    add_captions(
-        rendered_path,
-        remapped,
-        output_path,
-        style=details.get("style", DEFAULT_CAPTION_STYLE),
-        max_words_per_line=details.get("max_words_per_line"),
-    )
+    current = rendered_path
+    intermediates: list[Path] = []
+    try:
+        for index, (details, remapped) in enumerate(passes):
+            is_last = index == len(passes) - 1
+            target = (
+                output_path
+                if is_last
+                else output_path.with_name(
+                    f"{output_path.stem}.cap{index}{output_path.suffix}"
+                )
+            )
+            add_captions(
+                current,
+                remapped,
+                target,
+                style=details.get("style", DEFAULT_CAPTION_STYLE),
+                max_words_per_line=details.get("max_words_per_line"),
+            )
+            if not is_last:
+                intermediates.append(target)
+            current = target
+    finally:
+        for path in intermediates:
+            path.unlink(missing_ok=True)
     rendered_path.unlink(missing_ok=True)
 
 
@@ -2457,57 +2471,64 @@ def _execute_render(job_id: str, project_id: str, session: Session) -> None:
     def on_progress(fraction: float) -> None:
         update_render_job(job_id, progress=round(fraction * encode_scale, 4))
 
-    if timeline_rows:
-        render_timeline(
-            str(video_path),
-            [{"start": row.start, "end": row.end} for row in timeline_rows],
-            str(render_target),
-            cut_ranges,
-            zoom_ranges,
-            stock_footage_ranges,
-            diagram_ranges,
-            on_progress=on_progress,
-        )
-    else:
-        render_with_edits(
-            str(video_path),
-            cut_ranges,
-            zoom_ranges,
-            str(render_target),
-            stock_footage_ranges,
-            diagram_ranges,
-            on_progress=on_progress,
-        )
+    try:
+        if timeline_rows:
+            render_timeline(
+                str(video_path),
+                [{"start": row.start, "end": row.end} for row in timeline_rows],
+                str(render_target),
+                cut_ranges,
+                zoom_ranges,
+                stock_footage_ranges,
+                diagram_ranges,
+                on_progress=on_progress,
+            )
+        else:
+            render_with_edits(
+                str(video_path),
+                cut_ranges,
+                zoom_ranges,
+                str(render_target),
+                stock_footage_ranges,
+                diagram_ranges,
+                on_progress=on_progress,
+            )
 
-    # Chain the burn passes: each reads the previous stage's file and the last
-    # one writes output_path (an intermediate in between when both run).
-    burn_source = render_target
-    if captions_edits:
-        update_render_job(job_id, progress=encode_scale)
-        caption_out = (
-            OUTPUT_DIR / f"pretext_{output_filename}"
-            if text_caption_edits
-            else output_path
-        )
-        _burn_project_captions(
-            video_path,
-            burn_source,
-            caption_out,
-            captions_edits,
-            cut_ranges,
-            timeline_rows,
-        )
-        burn_source = caption_out
-    if text_caption_edits:
-        update_render_job(job_id, progress=encode_scale)
-        _burn_project_text_captions(
-            video_path,
-            burn_source,
-            output_path,
-            text_caption_edits,
-            cut_ranges,
-            timeline_rows,
-        )
+        # Chain the burn passes: each reads the previous stage's file and the last
+        # one writes output_path (an intermediate in between when both run).
+        burn_source = render_target
+        if captions_edits:
+            update_render_job(job_id, progress=encode_scale)
+            caption_out = (
+                OUTPUT_DIR / f"pretext_{output_filename}"
+                if text_caption_edits
+                else output_path
+            )
+            _burn_project_captions(
+                video_path,
+                burn_source,
+                caption_out,
+                captions_edits,
+                cut_ranges,
+                timeline_rows,
+            )
+            burn_source = caption_out
+        if text_caption_edits:
+            update_render_job(job_id, progress=encode_scale)
+            _burn_project_text_captions(
+                video_path,
+                burn_source,
+                output_path,
+                text_caption_edits,
+                cut_ranges,
+                timeline_rows,
+            )
+    finally:
+        # Intermediates are only consumed on success; drop them on failure too.
+        if has_burn_pass:
+            render_target.unlink(missing_ok=True)
+        if text_caption_edits:
+            (OUTPUT_DIR / f"pretext_{output_filename}").unlink(missing_ok=True)
 
     applied_edits = (
         len(cut_ranges)

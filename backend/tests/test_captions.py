@@ -251,3 +251,47 @@ def test_add_captions_rejects_empty_words(tmp_path: Path):
     _encode_black_fixture(source, seconds=1.0)
     with pytest.raises(ValueError, match="No caption words"):
         add_captions(source, [], tmp_path / "out.mp4")
+
+
+def test_burn_project_captions_uses_each_edits_own_style(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import importlib
+
+    app_module = importlib.import_module("backend.app")
+
+    calls: list[tuple[str, list]] = []
+
+    def fake_add_captions(video, words, out, style, max_words_per_line=None):
+        calls.append((style, [w["word"] for w in words]))
+        out.write_bytes(b"x")
+
+    monkeypatch.setattr(app_module, "add_captions", fake_add_captions)
+    monkeypatch.setattr(app_module, "video_duration", lambda path: 20.0)
+
+    def edit(start, end, style, word):
+        return SimpleNamespace(
+            start=start,
+            end=end,
+            details={
+                "style": style,
+                "words": [{"start": start, "end": start + 1, "word": word}],
+            },
+        )
+
+    rendered = tmp_path / "rendered.mp4"
+    rendered.write_bytes(b"x")
+    output = tmp_path / "final.mp4"
+
+    app_module._burn_project_captions(
+        tmp_path / "src.mp4",
+        rendered,
+        output,
+        [edit(0, 5, "karaoke", "one"), edit(10, 15, "minimal", "two")],
+        [],
+        [],
+    )
+
+    assert calls == [("karaoke", ["one"]), ("minimal", ["two"])]
+    assert output.exists() and not rendered.exists()
+    assert not list(tmp_path.glob("*.cap*"))

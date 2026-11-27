@@ -60,6 +60,8 @@ import './App.css';
 
 // How often to poll a running render job for progress.
 const RENDER_POLL_INTERVAL_MS = 1000;
+// Consecutive failed status polls tolerated before giving up on a render.
+const RENDER_POLL_MAX_FAILURES = 5;
 // How often to poll a running death-detection job.
 const DEATH_POLL_INTERVAL_MS = 2000;
 // How often to poll a running transcription job.
@@ -187,8 +189,12 @@ function App() {
   const deathPollRef = useRef(null);
   const markerPollRef = useRef(null);
   const highlightPollRef = useRef(null);
-  // Holds the setInterval id for polling the active render job's status.
+  // Holds the timeout id for polling the active render job's status.
   const renderPollRef = useRef(null);
+  // Bumped on every stop so an in-flight poll knows it was cancelled.
+  const renderPollGenRef = useRef(0);
+  // Identity of the saved captions settings last pushed into the panel state.
+  const savedCaptionsKeyRef = useRef(null);
   // Holds the setInterval id for polling the active transcription job.
   const transcriptPollRef = useRef(null);
 
@@ -249,10 +255,23 @@ function App() {
     const captionsEdits = edits.filter((edit) => edit.type === 'captions');
     setSavedCaptionsEdits(captionsEdits);
     setSavedTextCaptions(edits.filter((edit) => edit.type === 'text_caption'));
-    // Adopt the saved captions settings so the panel and live preview match.
-    if (captionsEdits[0]?.metadata?.style) {
-      setCaptionStyleName(captionsEdits[0].metadata.style);
-      setCaptionWordsPerLine(captionsEdits[0].metadata.max_words_per_line ?? null);
+    // Adopt the saved captions settings so the panel and live preview match —
+    // but only when the saved edit itself changed, so reloading after an
+    // unrelated edit doesn't clobber an unsaved style the user is previewing.
+    const savedCaptions = captionsEdits[0];
+    if (savedCaptions?.metadata?.style) {
+      const savedKey = [
+        savedCaptions.id,
+        savedCaptions.metadata.style,
+        savedCaptions.metadata.max_words_per_line ?? '',
+      ].join(':');
+      if (savedCaptionsKeyRef.current !== savedKey) {
+        savedCaptionsKeyRef.current = savedKey;
+        setCaptionStyleName(savedCaptions.metadata.style);
+        setCaptionWordsPerLine(savedCaptions.metadata.max_words_per_line ?? null);
+      }
+    } else {
+      savedCaptionsKeyRef.current = null;
     }
   };
 
@@ -1587,8 +1606,9 @@ function App() {
   // status for progress and the final download URL. The interval id lives in
   // renderPollRef so it can be cleared on completion, error, or unmount.
   const stopRenderPolling = () => {
+    renderPollGenRef.current += 1;
     if (renderPollRef.current) {
-      clearInterval(renderPollRef.current);
+      clearTimeout(renderPollRef.current);
       renderPollRef.current = null;
     }
   };
@@ -1658,9 +1678,16 @@ function App() {
 
     try {
       const { job_id: jobId } = await renderProject(projectId);
-      renderPollRef.current = setInterval(async () => {
+      // Chained timeouts (not setInterval) so a slow status request can't
+      // overlap the next one; a few consecutive failures are tolerated so a
+      // single network blip doesn't abandon a job that is still rendering.
+      let failures = 0;
+      const generation = renderPollGenRef.current;
+      const pollRender = async () => {
         try {
           const status = await getRenderStatus(jobId);
+          if (generation !== renderPollGenRef.current) return;
+          failures = 0;
           setRenderProgress(status.progress || 0);
           if (status.status === 'done') {
             stopRenderPolling();
@@ -1674,19 +1701,29 @@ function App() {
             logActivity(
               `Rendered "${status.filename}" with ${status.applied_edits} edits applied.`
             );
-          } else if (status.status === 'error') {
+            return;
+          }
+          if (status.status === 'error') {
             stopRenderPolling();
             setToolError(status.error || 'Could not render the project.');
             setIsRendering(false);
             logActivity('Render failed. Check the render page for details.');
+            return;
           }
         } catch (error) {
-          stopRenderPolling();
+          if (generation !== renderPollGenRef.current) return;
+          failures += 1;
           console.error('Error polling render status:', error);
-          setToolError('Lost contact with the render job.');
-          setIsRendering(false);
+          if (failures >= RENDER_POLL_MAX_FAILURES) {
+            stopRenderPolling();
+            setToolError('Lost contact with the render job.');
+            setIsRendering(false);
+            return;
+          }
         }
-      }, RENDER_POLL_INTERVAL_MS);
+        renderPollRef.current = setTimeout(pollRender, RENDER_POLL_INTERVAL_MS);
+      };
+      renderPollRef.current = setTimeout(pollRender, RENDER_POLL_INTERVAL_MS);
     } catch (error) {
       console.error('Error starting render:', error);
       setToolError('Could not start the render.');
